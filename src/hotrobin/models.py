@@ -33,11 +33,6 @@ SCHEMA_VERSION = 1
 SHANGHAI_TZ = timezone(timedelta(hours=8))
 
 
-def today_shanghai() -> str:
-    """Today's date in Asia/Shanghai (UTC+8)."""
-    return datetime.now(SHANGHAI_TZ).date().isoformat()
-
-
 def _optional_int(value: Any) -> int | None:
     return None if value is None else int(value)
 
@@ -88,6 +83,11 @@ class Snapshot:
         """Local date of the snapshot, taken from its own UTC offset."""
         return datetime.fromisoformat(self.fetched_at).date().isoformat()
 
+    @property
+    def run_id(self) -> str:
+        """Timestamped run directory name, e.g. ``2026-10-28-214503``."""
+        return datetime.fromisoformat(self.fetched_at).strftime("%Y-%m-%d-%H%M%S")
+
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> Snapshot:
         return cls(
@@ -112,14 +112,39 @@ def load_snapshot(path: Path) -> Snapshot:
 
 
 def save_snapshot(snapshot: Snapshot, data_dir: Path) -> Path:
-    """Write a snapshot to ``data/<platform>/<date>/snapshot.json``."""
-    path = data_dir / snapshot.platform / snapshot.date / "snapshot.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
+    """Write a snapshot to a fresh ``data/<platform>/<run_id>/`` directory.
+
+    Every fetch gets its own timestamped directory; earlier runs are never
+    overwritten.
+    """
+    base = snapshot.run_id
+    run_dir = data_dir / snapshot.platform / base
+    suffix = 2
+    while run_dir.exists():
+        run_dir = data_dir / snapshot.platform / f"{base}-{suffix}"
+        suffix += 1
+
+    run_dir.mkdir(parents=True, exist_ok=True)
+    path = run_dir / "snapshot.json"
     path.write_text(
         json.dumps(snapshot.to_dict(), ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
     return path
+
+
+def latest_run_dir(data_dir: Path, platform: str = "zhihu") -> Path:
+    """Return the directory of the newest snapshot run."""
+    runs: list[tuple[str, Path]] = []
+    for path in (data_dir / platform).glob("*/snapshot.json"):
+        try:
+            snapshot = load_snapshot(path)
+        except (OSError, KeyError, TypeError, ValueError):
+            continue
+        runs.append((snapshot.fetched_at, path.parent))
+    if not runs:
+        raise SystemExit(f"没有找到 {platform} 快照，先运行 hotrobin fetch")
+    return max(runs)[1]
 
 
 @dataclass(frozen=True)

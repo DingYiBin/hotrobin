@@ -5,24 +5,48 @@ from __future__ import annotations
 from pathlib import Path
 
 from .build import build_site
+from .failures import load_failures, notify_failures, record_failure
 from .models import save_snapshot
 from .official import collect_answers, fetch_hot_list
 from .report import generate_report
 
 
-def run_daily(data_dir: Path, out_dir: Path, *, force: bool = False) -> None:
-    """Fetch the hot list, collect answers, build the report, render the site."""
-    snapshot = fetch_hot_list()
-    path = save_snapshot(snapshot, data_dir)
-    print(f"已抓取 {len(snapshot.items)} 条热榜，保存到 {path}")
+def run_daily(data_dir: Path, out_dir: Path) -> None:
+    """Fetch the hot list, collect answers, build the report, render the site.
 
-    fetched, skipped, failed = collect_answers(
-        data_dir, date=snapshot.date, force=force
-    )
-    print(f"回答摘要：新增 {fetched}，跳过 {skipped}，失败 {failed}")
+    Failures are recorded in the run directory (or ``data/zhihu/failures/``
+    before a run exists) and one webhook notification is sent per run.
+    """
+    run_dir: Path | None = None
+    step = "fetch"
+    try:
+        snapshot = fetch_hot_list()
+        path = save_snapshot(snapshot, data_dir)
+        run_dir = path.parent
+        print(
+            f"已抓取 {len(snapshot.items)} 条热榜，保存到 {path}"
+            f"（run {run_dir.name}）"
+        )
 
-    report_path = generate_report(data_dir, snapshot.date, force=force)
-    print(f"报告：{report_path}")
+        step = "answers"
+        fetched, skipped, failed = collect_answers(run_dir)
+        print(f"回答摘要：新增 {fetched}，跳过 {skipped}，失败 {failed}")
 
-    count = build_site(data_dir, out_dir)
-    print(f"已生成 {count} 个快照页面 -> {out_dir}")
+        step = "report"
+        report_path = generate_report(run_dir)
+        print(f"报告：{report_path}")
+
+        step = "build"
+        count = build_site(data_dir, out_dir)
+        print(f"已生成 {count} 个快照页面 -> {out_dir}")
+    except (SystemExit, Exception) as exc:
+        if run_dir is None:
+            failure_path = record_failure(None, step, str(exc), data_dir=data_dir)
+            notify_failures(None, failure_path=failure_path)
+        else:
+            if not load_failures(run_dir):
+                record_failure(run_dir, step, str(exc))
+            notify_failures(run_dir)
+        raise
+
+    notify_failures(run_dir)

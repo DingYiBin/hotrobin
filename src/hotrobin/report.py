@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .deepseek import chat_json, model_name
+from .failures import record_failure
 from .models import (
     SHANGHAI_TZ,
     Snapshot,
@@ -211,47 +212,52 @@ def _sentiment_summary(results: list[dict[str, Any]]) -> tuple[dict[str, int], d
 
 
 def generate_report(
-    data_dir: Path,
-    date: str,
+    run_dir: Path,
     *,
     batch_size: int = DEFAULT_BATCH_SIZE,
     answers_per_question: int = DEFAULT_ANSWERS_PER_QUESTION,
-    force: bool = False,
 ) -> Path:
-    """Create ``data/zhihu/<date>/report.json`` and return its path."""
-    day_dir = data_dir / "zhihu" / date
-    snapshot_path = day_dir / "snapshot.json"
+    """Create ``<run_dir>/report.json`` and return its path."""
+    snapshot_path = run_dir / "snapshot.json"
     if not snapshot_path.exists():
         raise SystemExit(f"找不到 {snapshot_path}，先运行 hotrobin fetch")
 
-    report_path = day_dir / "report.json"
-    if report_path.exists() and not force:
-        print(f"报告已存在，跳过：{report_path}（--force 可重跑）")
-        return report_path
-
     snapshot = load_snapshot(snapshot_path)
-    bundles = _bundles(snapshot, day_dir / "answers", answers_per_question)
+    bundles = _bundles(snapshot, run_dir / "answers", answers_per_question)
 
     results: list[dict[str, Any]] = []
     usages: list[dict[str, Any]] = []
     for start in range(0, len(bundles), batch_size):
         batch = bundles[start : start + batch_size]
+        batch_label = f"questions {start + 1}-{start + len(batch)}"
         print(f"  分析 {start + 1}-{start + len(batch)} / {len(bundles)}")
         try:
-            batch_results, usage = _analyze_batch(
-                batch, f"questions {start + 1}-{start + len(batch)}"
-            )
+            batch_results, usage = _analyze_batch(batch, batch_label)
         except (KeyError, TypeError, ValueError) as exc:
+            record_failure(
+                run_dir, "report", f"{batch_label}: {exc}", {"batch": batch_label}
+            )
             print(f"  这批分析失败：{exc}")
             continue
+        except SystemExit as exc:
+            record_failure(run_dir, "report", str(exc), {"batch": batch_label})
+            raise
         results.extend(batch_results)
         usages.append(usage)
 
     if not results:
+        record_failure(run_dir, "report", "没有生成任何逐题分析")
         raise SystemExit("没有生成任何逐题分析，请检查 DeepSeek 配置或输出")
 
     known_ids = {result["id"] for result in results}
-    overall, aggregate_usage = _aggregate(results, known_ids)
+    try:
+        overall, aggregate_usage = _aggregate(results, known_ids)
+    except SystemExit as exc:
+        record_failure(run_dir, "report", str(exc), {"batch": "aggregate"})
+        raise
+    except (KeyError, TypeError, ValueError) as exc:
+        record_failure(run_dir, "report", f"汇总失败：{exc}", {"batch": "aggregate"})
+        raise SystemExit(f"汇总失败：{exc}") from exc
     usages.append(aggregate_usage)
     usage_totals = _usage_totals(usages)
     counts, ratios = _sentiment_summary(results)
@@ -259,7 +265,8 @@ def generate_report(
     report = {
         "schema_version": SCHEMA_VERSION,
         "platform": "zhihu",
-        "date": date,
+        "date": snapshot.date,
+        "run_at": snapshot.fetched_at,
         "model": model_name(),
         "prompt_version": PROMPT_VERSION,
         "generated_at": datetime.now(SHANGHAI_TZ).isoformat(timespec="seconds"),
@@ -283,6 +290,7 @@ def generate_report(
         "controversies": overall["controversies"],
         "questions": results,
     }
+    report_path = run_dir / "report.json"
     report_path.write_text(
         json.dumps(report, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",

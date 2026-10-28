@@ -22,6 +22,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from .failures import record_failure
 from .models import (
     SHANGHAI_TZ,
     AnswerDigest,
@@ -168,18 +169,16 @@ def fetch_question_answers(question_url: str, limit: int = DEFAULT_ANSWER_LIMIT)
 
 
 def collect_answers(
-    data_dir: Path,
+    run_dir: Path,
     *,
-    date: str,
     limit: int = DEFAULT_ANSWER_LIMIT,
     max_questions: int = DEFAULT_MAX_QUESTIONS,
-    force: bool = False,
 ) -> tuple[int, int, int]:
-    """Collect answer summaries for today's hot list questions.
+    """Collect answer summaries for one hot-list run.
 
     Returns ``(fetched, skipped, failed)``.
     """
-    snapshot_path = data_dir / "zhihu" / date / "snapshot.json"
+    snapshot_path = run_dir / "snapshot.json"
     if not snapshot_path.exists():
         raise SystemExit(f"找不到 {snapshot_path}，先运行 hotrobin fetch")
 
@@ -187,26 +186,35 @@ def collect_answers(
     questions = [item for item in snapshot.items if QUESTION_RE.search(item.url)]
     questions = questions[:max_questions]
     if not questions:
-        raise SystemExit("今日热榜没有可抓取的问题")
+        raise SystemExit("本次热榜没有可抓取的问题")
 
-    answer_dir = snapshot_path.parent / "answers"
+    answer_dir = run_dir / "answers"
     answer_dir.mkdir(parents=True, exist_ok=True)
 
     fetched = skipped = failed = 0
     for index, item in enumerate(questions, start=1):
         path = answer_dir / f"{item.id}.json"
-        if path.exists() and not force:
+        if path.exists():
             skipped += 1
             continue
 
         try:
             answers = fetch_question_answers(item.url, limit=limit)
         except ZhihuAPIError as exc:
+            record_failure(
+                run_dir,
+                "answers",
+                str(exc),
+                {"question_id": item.id, "code": exc.code},
+            )
             if exc.code in (20001, 30001, 30002):
                 raise SystemExit(str(exc)) from exc
             print(f"  [{index}/{len(questions)}] 抓取失败 {item.id}: {exc}")
             failed += 1
             continue
+        except SystemExit as exc:
+            record_failure(run_dir, "answers", str(exc), {"question_id": item.id})
+            raise
 
         payload = QuestionAnswers(
             question_url=item.url,
