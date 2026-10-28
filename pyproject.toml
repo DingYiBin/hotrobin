@@ -1,0 +1,17 @@
+[project]
+name = "hotrobin"
+version = "0.1.0"
+description = "Daily hot-topic summaries from social platforms (Zhihu first)."
+readme = "README.md"
+authors = [
+    { name = "Hugo Ding", email = "hugo_ding@yeah.net" }
+]
+requires-python = ">=3.12"
+dependencies = []
+
+[project.scripts]
+hotrobin = "hotrobin:main"
+
+[build-system]
+requires = ["uv_build>=0.9.26,<0.10.0"]
+build-backend = "uv_build"
