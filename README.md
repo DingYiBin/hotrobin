@@ -31,11 +31,21 @@ uv run hotrobin serve   # 打开 http://127.0.0.1:8000/
 
 分步执行：`fetch`（官方热榜）、`answers`（每题回答摘要）、`report`（DeepSeek 情绪分析）、`build`（渲染站点）。
 
+## 定时
+
+在 `.env` 中设置 `HOTROBIN_DAILY_AT`（24 小时制 `HH:MM`，北京时间，默认 `07:30`），然后常驻运行：
+
+```bash
+uv run hotrobin schedule
+```
+
+例如 `HOTROBIN_DAILY_AT=07:30` 表示每天 07:30 执行一次 `daily`。进程需要保持运行（nohup、tmux 或 systemd）；WSL 重启后需重新启动。
+
 ## 数据
 
 - `data/zhihu/<日期>/snapshot.json`：热榜快照
 - `data/zhihu/<日期>/answers/<问题ID>.json`：回答摘要
-- `data/zhihu/<日期>/report.json`：逐题情绪分析与当日汇总
+- `data/zhihu/<日期>/report.json`：逐题情绪分析与当日汇总，含每次模型调用的 token 用量
 
 数据不进入 git，只保存在运行机器上。`site/` 是生成产物，同样不入库。局域网访问：`uv run hotrobin serve --host 0.0.0.0`。
 

@@ -227,6 +227,13 @@ def _render_report(report: dict) -> str:
         f"基于 {coverage.get('questions_analyzed', 0)}/{coverage.get('questions', 0)} 个问题、"
         f"{coverage.get('answers_analyzed', 0)} 条回答摘要 · 模型 {report.get('model', '')}"
     )
+    usage_totals = (report.get("usage") or {}).get("totals") or {}
+    if usage_totals:
+        meta += (
+            f" · tokens 输入 {int(usage_totals.get('prompt_tokens') or 0):,}"
+            f" / 输出 {int(usage_totals.get('completion_tokens') or 0):,}"
+            f"（{int(usage_totals.get('calls') or 0)} 次调用）"
+        )
 
     theme_items = []
     for theme in report.get("themes") or []:

@@ -16,12 +16,19 @@ import re
 import time
 import urllib.error
 import urllib.request
+from dataclasses import dataclass
 from typing import Any
 
 DEFAULT_BASE_URL = "https://api.deepseek.com"
 DEFAULT_MODEL = "deepseek-chat"
 DEFAULT_MAX_TOKENS = 8192
 REQUEST_TIMEOUT = 240
+
+
+@dataclass(frozen=True)
+class ChatResult:
+    data: dict[str, Any]
+    usage: dict[str, Any]
 
 
 def model_name() -> str:
@@ -49,8 +56,23 @@ def _parse_json(content: str) -> dict[str, Any]:
         raise
 
 
-def chat_json(system: str, user: str) -> dict[str, Any]:
-    """Call the model and return its JSON output."""
+def _usage_from_response(data: dict[str, Any], finish_reason: Any) -> dict[str, Any]:
+    usage = data.get("usage") or {}
+    details = usage.get("completion_tokens_details") or {}
+    result = {
+        "model": data.get("model") or model_name(),
+        "finish_reason": finish_reason,
+        "prompt_tokens": int(usage.get("prompt_tokens") or 0),
+        "completion_tokens": int(usage.get("completion_tokens") or 0),
+        "reasoning_tokens": int(details.get("reasoning_tokens") or 0),
+        "total_tokens": int(usage.get("total_tokens") or 0),
+        "cache_hit_tokens": int(usage.get("prompt_cache_hit_tokens") or 0),
+    }
+    return result
+
+
+def chat_json(system: str, user: str) -> ChatResult:
+    """Call the model and return its JSON output plus token usage."""
     base = os.environ.get("DEEPSEEK_BASE_URL", DEFAULT_BASE_URL).rstrip("/")
     key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
     if not key:
@@ -109,10 +131,14 @@ def chat_json(system: str, user: str) -> dict[str, Any]:
             )
 
         try:
-            return _parse_json(content)
+            parsed = _parse_json(content)
         except json.JSONDecodeError:
             if attempt < 2:
                 continue
             raise SystemExit(f"DeepSeek 输出不是合法 JSON：{content[:200]}")
+        return ChatResult(
+            data=parsed,
+            usage=_usage_from_response(data, choice.get("finish_reason")),
+        )
 
     raise SystemExit("DeepSeek 调用失败")

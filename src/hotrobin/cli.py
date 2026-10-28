@@ -12,7 +12,9 @@ from pathlib import Path
 from .build import build_site
 from .models import save_snapshot, today_shanghai
 from .official import collect_answers, fetch_hot_list
+from .pipeline import run_daily
 from .report import generate_report
+from .schedule import run_scheduler
 
 
 def _load_dotenv(path: Path = Path(".env")) -> None:
@@ -88,6 +90,13 @@ def main(argv: Sequence[str] | None = None) -> None:
     daily_parser.add_argument("--out", type=Path, default=Path("site"))
     daily_parser.add_argument("--force", action="store_true", help="覆盖当日已有数据")
 
+    schedule_parser = sub.add_parser(
+        "schedule", help="按 .env 的 HOTROBIN_DAILY_AT 每天定时运行 daily"
+    )
+    schedule_parser.add_argument("--data-dir", type=Path, default=Path("data"))
+    schedule_parser.add_argument("--out", type=Path, default=Path("site"))
+    schedule_parser.add_argument("--force", action="store_true", help="每轮都覆盖当日已有数据")
+
     args = parser.parse_args(argv)
 
     if args.command == "fetch":
@@ -116,17 +125,9 @@ def main(argv: Sequence[str] | None = None) -> None:
         count = build_site(args.data_dir, args.out)
         print(f"已生成 {count} 个快照页面 -> {args.out}")
     elif args.command == "daily":
-        snapshot = fetch_hot_list()
-        path = save_snapshot(snapshot, args.data_dir)
-        print(f"已抓取 {len(snapshot.items)} 条热榜，保存到 {path}")
-        fetched, skipped, failed = collect_answers(
-            args.data_dir, date=snapshot.date, force=args.force
-        )
-        print(f"回答摘要：新增 {fetched}，跳过 {skipped}，失败 {failed}")
-        report_path = generate_report(args.data_dir, snapshot.date, force=args.force)
-        print(f"报告：{report_path}")
-        count = build_site(args.data_dir, args.out)
-        print(f"已生成 {count} 个快照页面 -> {args.out}")
+        run_daily(args.data_dir, args.out, force=args.force)
+    elif args.command == "schedule":
+        run_scheduler(args.data_dir, args.out, force=args.force)
     else:
         _serve(args.site_dir, args.host, args.port)
 

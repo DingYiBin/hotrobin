@@ -96,7 +96,9 @@ def _normalize_question(raw: dict[str, Any], bundle: dict[str, Any]) -> dict[str
     }
 
 
-def _analyze_batch(batch: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _analyze_batch(
+    batch: list[dict[str, Any]], purpose: str
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     payload = [
         {
             "id": bundle["id"],
@@ -106,7 +108,8 @@ def _analyze_batch(batch: list[dict[str, Any]]) -> list[dict[str, Any]]:
         }
         for bundle in batch
     ]
-    data = chat_json(BATCH_SYSTEM, json.dumps({"questions": payload}, ensure_ascii=False))
+    response = chat_json(BATCH_SYSTEM, json.dumps({"questions": payload}, ensure_ascii=False))
+    data = response.data
     raw_results = data.get("questions")
     if not isinstance(raw_results, list):
         raise ValueError("模型输出缺少 questions 数组")
@@ -127,10 +130,12 @@ def _analyze_batch(batch: list[dict[str, Any]]) -> list[dict[str, Any]]:
     missing = [bundle["id"] for bundle in batch if bundle["id"] not in seen]
     if missing:
         print(f"  模型漏掉：{', '.join(missing)}")
-    return results
+    return results, dict(response.usage, purpose=purpose)
 
 
-def _aggregate(results: list[dict[str, Any]], known_ids: set[str]) -> dict[str, Any]:
+def _aggregate(
+    results: list[dict[str, Any]], known_ids: set[str]
+) -> tuple[dict[str, Any], dict[str, Any]]:
     payload = [
         {
             "id": result["id"],
@@ -141,7 +146,8 @@ def _aggregate(results: list[dict[str, Any]], known_ids: set[str]) -> dict[str, 
         }
         for result in results
     ]
-    data = chat_json(AGG_SYSTEM, json.dumps({"questions": payload}, ensure_ascii=False))
+    response = chat_json(AGG_SYSTEM, json.dumps({"questions": payload}, ensure_ascii=False))
+    data = response.data
 
     themes = []
     for raw in data.get("themes") or []:
@@ -171,12 +177,29 @@ def _aggregate(results: list[dict[str, Any]], known_ids: set[str]) -> dict[str, 
             }
         )
 
-    return {
+    overall = {
         "tone": str(data.get("overall_tone") or ""),
         "summary": str(data.get("overall_summary") or ""),
         "themes": themes,
         "controversies": controversies,
     }
+    return overall, dict(response.usage, purpose="aggregate")
+
+
+def _usage_totals(usages: list[dict[str, Any]]) -> dict[str, int]:
+    totals = {
+        "calls": len(usages),
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "reasoning_tokens": 0,
+        "cache_hit_tokens": 0,
+        "total_tokens": 0,
+    }
+    for usage in usages:
+        for key in totals:
+            if key != "calls":
+                totals[key] += int(usage.get(key) or 0)
+    return totals
 
 
 def _sentiment_summary(results: list[dict[str, Any]]) -> tuple[dict[str, int], dict[str, float]]:
@@ -210,19 +233,27 @@ def generate_report(
     bundles = _bundles(snapshot, day_dir / "answers", answers_per_question)
 
     results: list[dict[str, Any]] = []
+    usages: list[dict[str, Any]] = []
     for start in range(0, len(bundles), batch_size):
         batch = bundles[start : start + batch_size]
         print(f"  分析 {start + 1}-{start + len(batch)} / {len(bundles)}")
         try:
-            results.extend(_analyze_batch(batch))
+            batch_results, usage = _analyze_batch(
+                batch, f"questions {start + 1}-{start + len(batch)}"
+            )
         except (KeyError, TypeError, ValueError) as exc:
             print(f"  这批分析失败：{exc}")
+            continue
+        results.extend(batch_results)
+        usages.append(usage)
 
     if not results:
         raise SystemExit("没有生成任何逐题分析，请检查 DeepSeek 配置或输出")
 
     known_ids = {result["id"] for result in results}
-    overall = _aggregate(results, known_ids)
+    overall, aggregate_usage = _aggregate(results, known_ids)
+    usages.append(aggregate_usage)
+    usage_totals = _usage_totals(usages)
     counts, ratios = _sentiment_summary(results)
 
     report = {
@@ -236,6 +267,10 @@ def generate_report(
             "questions": len(bundles),
             "questions_analyzed": len(results),
             "answers_analyzed": sum(result["answers_analyzed"] for result in results),
+        },
+        "usage": {
+            "calls": usages,
+            "totals": usage_totals,
         },
         "overall": {
             "tone": overall["tone"],
@@ -251,5 +286,11 @@ def generate_report(
     report_path.write_text(
         json.dumps(report, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
+    )
+    print(
+        f"  tokens：输入 {usage_totals['prompt_tokens']:,} / "
+        f"输出 {usage_totals['completion_tokens']:,}"
+        f"（其中推理 {usage_totals['reasoning_tokens']:,}），"
+        f"共 {usage_totals['calls']} 次调用"
     )
     return report_path
