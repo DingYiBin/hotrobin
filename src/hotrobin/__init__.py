@@ -1,2 +1,1 @@
-def main() -> None:
-    print("Hello from hotrobin!")
+"""hotrobin：每日热点抓取、总结与浏览。"""
