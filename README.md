@@ -26,7 +26,7 @@ Python 版本锁定在 `.python-version`（>=3.12），依赖版本由 `uv.lock`
 
 ```bash
 uv run hotrobin daily   # 热榜 -> 回答摘要 -> 情绪报告 -> 构建站点
-uv run hotrobin serve   # 打开 http://127.0.0.1:8000/
+uv run hotrobin serve   # 默认 http://127.0.0.1:20301/，局域网可用本机 IP 访问
 ```
 
 分步执行：`fetch`（官方热榜）、`answers`（每题回答摘要）、`report`（DeepSeek 情绪分析）、`build`（渲染站点）。
@@ -47,7 +47,7 @@ uv run hotrobin schedule
 - `data/zhihu/<日期>/answers/<问题ID>.json`：回答摘要
 - `data/zhihu/<日期>/report.json`：逐题情绪分析与当日汇总，含每次模型调用的 token 用量
 
-数据不进入 git，只保存在运行机器上。`site/` 是生成产物，同样不入库。局域网访问：`uv run hotrobin serve --host 0.0.0.0`。
+数据不进入 git，只保存在运行机器上。`site/` 是生成产物，同样不入库。`serve` 默认监听 `0.0.0.0`（局域网可访问），仅本机访问用 `--host 127.0.0.1`。
 
 ## 状态
 

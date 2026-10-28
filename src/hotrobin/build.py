@@ -120,6 +120,21 @@ h2 { font-size: 1.15rem; margin: 0 0 0.75rem; }
 .question-links a { margin-right: 0.6rem; }
 .overall .tone { font-weight: 600; margin: 0.25rem 0; }
 .report-link { font-size: 0.85rem; }
+.distribution { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-top: 0.6rem; }
+.distribution .badge { margin-right: 0; }
+.dist-bar {
+  display: flex;
+  height: 10px;
+  margin-top: 0.6rem;
+  border-radius: 999px;
+  overflow: hidden;
+  background: var(--border);
+}
+.dist-bar span { display: block; height: 100%; }
+.dist-bar .pos { background: #16a34a; }
+.dist-bar .neg { background: #dc2626; }
+.dist-bar .neutral { background: #6b7280; }
+.dist-bar .mixed { background: #d97706; }
 """
 
 
@@ -191,11 +206,18 @@ def _render_day(date: str, snapshot: Snapshot) -> str:
     return _page(f"{platform}热点 · {date}", body)
 
 
-def _badge(sentiment: str) -> str:
-    css = {"正面": "pos", "负面": "neg", "中性": "neutral", "两极": "mixed"}.get(
+def _sentiment_css(sentiment: str) -> str:
+    return {"正面": "pos", "负面": "neg", "中性": "neutral", "两极": "mixed"}.get(
         sentiment, "neutral"
     )
-    return f'<span class="badge {css}">{_escape(sentiment)}</span>'
+
+
+def _badge(sentiment: str) -> str:
+    return f'<span class="badge {_sentiment_css(sentiment)}">{_escape(sentiment)}</span>'
+
+
+def _pct(ratio: float) -> str:
+    return f"{round(ratio * 100, 1):g}%"
 
 
 def _clip(text: str, limit: int = 40) -> str:
@@ -222,7 +244,32 @@ def _render_report(report: dict) -> str:
     by_id = {str(q.get("id")): q for q in questions}
 
     counts = overall.get("sentiment_counts") or {}
-    counts_text = " · ".join(f"{key} {value}" for key, value in counts.items()) or "无"
+    ratios = overall.get("sentiment_ratios") or {}
+    total = sum(int(count or 0) for count in counts.values())
+    chips = []
+    segments = []
+    for sentiment, count in counts.items():
+        count = int(count or 0)
+        ratio = ratios.get(sentiment)
+        if ratio is None:
+            ratio = (count / total) if total else 0.0
+        css = _sentiment_css(str(sentiment))
+        chips.append(
+            f'<span class="badge {css}">{_escape(str(sentiment))} '
+            f"{count} · {_pct(float(ratio))}</span>"
+        )
+        if ratio > 0:
+            segments.append(
+                f'<span class="{css}" style="width: {float(ratio) * 100:.2f}%" '
+                f'title="{_escape(str(sentiment))} {count}"></span>'
+            )
+    distribution_html = (
+        f'<div class="dist-bar">{"".join(segments)}</div>\n'
+        f'<div class="distribution">{"".join(chips)}</div>\n'
+        if chips
+        else '<p class="empty">无</p>\n'
+    )
+
     meta = (
         f"基于 {coverage.get('questions_analyzed', 0)}/{coverage.get('questions', 0)} 个问题、"
         f"{coverage.get('answers_analyzed', 0)} 条回答摘要 · 模型 {report.get('model', '')}"
@@ -313,8 +360,8 @@ def _render_report(report: dict) -> str:
         "<h2>整体基调</h2>\n"
         f'<p class="tone">{_escape(str(overall.get("tone") or ""))}</p>\n'
         f"<p>{_escape(str(overall.get('summary') or ''))}</p>\n"
-        f'<p class="meta">情绪分布（{_escape(str(overall.get("method") or ""))}）：'
-        f"{_escape(counts_text)}</p>\n"
+        f'<p class="meta">情绪分布（{_escape(str(overall.get("method") or ""))}）</p>\n'
+        f"{distribution_html}"
         "</section>\n"
         f"{themes_html}\n{controversies_html}\n"
         "<section><h2>逐题分析</h2>\n"

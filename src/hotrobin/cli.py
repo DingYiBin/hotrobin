@@ -81,9 +81,9 @@ def main(argv: Sequence[str] | None = None) -> None:
     serve_parser = sub.add_parser("serve", help="本地预览生成的站点")
     serve_parser.add_argument("--site-dir", type=Path, default=Path("site"))
     serve_parser.add_argument(
-        "--host", default="127.0.0.1", help="局域网访问可设为 0.0.0.0"
+        "--host", default="0.0.0.0", help="默认监听所有网卡；仅本机访问可设为 127.0.0.1"
     )
-    serve_parser.add_argument("--port", type=int, default=8000)
+    serve_parser.add_argument("--port", type=int, default=20301)
 
     daily_parser = sub.add_parser("daily", help="抓取 -> 回答摘要 -> 情绪报告 -> 构建站点")
     daily_parser.add_argument("--data-dir", type=Path, default=Path("data"))
