@@ -9,6 +9,8 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from .build import build_site
+from .models import save_snapshot
+from .zhihu import fetch_snapshot
 
 
 def _serve(site_dir: Path, host: str, port: int) -> None:
@@ -32,6 +34,9 @@ def main(argv: Sequence[str] | None = None) -> None:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
+    fetch_parser = sub.add_parser("fetch", help="抓取知乎热榜并保存快照")
+    fetch_parser.add_argument("--data-dir", type=Path, default=Path("data"))
+
     build_parser = sub.add_parser("build", help="把 data/ 渲染成静态站点")
     build_parser.add_argument("--data-dir", type=Path, default=Path("data"))
     build_parser.add_argument("--out", type=Path, default=Path("site"))
@@ -45,7 +50,11 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     args = parser.parse_args(argv)
 
-    if args.command == "build":
+    if args.command == "fetch":
+        snapshot = fetch_snapshot()
+        path = save_snapshot(snapshot, args.data_dir)
+        print(f"已抓取 {len(snapshot.items)} 条，保存到 {path}")
+    elif args.command == "build":
         count = build_site(args.data_dir, args.out)
         print(f"已生成 {count} 个快照页面 -> {args.out}")
     else:

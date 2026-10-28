@@ -103,3 +103,14 @@ class Snapshot:
 def load_snapshot(path: Path) -> Snapshot:
     """Load and validate a snapshot file."""
     return Snapshot.from_dict(json.loads(path.read_text(encoding="utf-8")))
+
+
+def save_snapshot(snapshot: Snapshot, data_dir: Path) -> Path:
+    """Write a snapshot to ``data/<platform>/<date>/snapshot.json``."""
+    path = data_dir / snapshot.platform / snapshot.date / "snapshot.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(snapshot.to_dict(), ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return path
