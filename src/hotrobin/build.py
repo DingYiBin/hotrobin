@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .models import HotItem, Snapshot, load_snapshot
+from .trend import render_trend_body
 
 PLATFORM_NAMES = {
     "zhihu": "知乎",
@@ -19,6 +20,8 @@ PLATFORM_NAMES = {
 
 # Pages live at <out>/<platform>/<year>/<month>/, three levels below site/.
 PAGE_PREFIX = "../../../"
+# The trend page lives at <out>/<platform>/trend.html.
+TREND_PREFIX = "../"
 
 STYLE = """
 :root {
@@ -125,6 +128,32 @@ h2 { font-size: 1.15rem; margin: 0 0 0.75rem; }
 .question-links a { margin-right: 0.6rem; }
 .overall .tone { font-weight: 600; margin: 0.25rem 0; }
 .report-link { font-size: 0.85rem; }
+.trend-link { margin: 0 0 0.75rem; }
+.trend-link a { font-weight: 600; }
+.legend { display: flex; flex-wrap: wrap; gap: 0.9rem; margin: 0.75rem 0 0.25rem; font-size: 0.9rem; }
+.legend-item i {
+  display: inline-block;
+  width: 0.7rem;
+  height: 0.7rem;
+  border-radius: 2px;
+  margin-right: 0.3rem;
+}
+.trend-chart { width: 100%; height: auto; color: var(--text); }
+.trend-chart text { fill: currentColor; }
+details table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+  margin-top: 0.5rem;
+}
+details th, details td {
+  text-align: right;
+  padding: 0.3rem 0.4rem;
+  border-bottom: 1px solid var(--border);
+  font-variant-numeric: tabular-nums;
+}
+details th:first-child, details td:first-child { text-align: left; }
+details summary { cursor: pointer; color: var(--accent); }
 .distribution { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-top: 0.6rem; }
 .distribution .badge { margin-right: 0; }
 .dist-bar {
@@ -410,11 +439,19 @@ def _load_reports(data_dir: Path) -> list[tuple[str, dict]]:
 def _render_index(
     entries: list[tuple[str, Snapshot, str]],
     report_links: dict[tuple[str, str], str],
+    trend_link: str | None = None,
 ) -> str:
     title = "hotrobin 热点快照"
+    trend_html = (
+        f'<p class="trend-link"><a href="{_escape(trend_link, quote=True)}">'
+        "查看情绪趋势 →</a></p>\n"
+        if trend_link
+        else ""
+    )
     if not entries:
         body = (
             f"<h1>{title}</h1>\n"
+            f"{trend_html}"
             '<p class="empty">还没有数据。把快照放到 '
             "<code>data/&lt;platform&gt;/&lt;year&gt;/&lt;month&gt;/&lt;run&gt;/snapshot.json</code> "
             "后运行 <code>hotrobin build</code>。</p>"
@@ -435,6 +472,7 @@ def _render_index(
     )
     body = (
         f"<h1>{title}</h1>\n"
+        f"{trend_html}"
         f'<p class="meta">共 {len(entries)} 份快照</p>\n'
         f'<ul class="snapshots">\n{rows}\n</ul>'
     )
@@ -505,8 +543,18 @@ def build_site(data_dir: Path, out_dir: Path) -> int:
         )
         report_links[(run_name, platform)] = f"{rel_dir.as_posix()}/{filename}"
 
+    trend_body = render_trend_body(reports)
+    trend_link = None
+    if trend_body is not None:
+        trend_path = out_dir / "zhihu" / "trend.html"
+        trend_path.parent.mkdir(parents=True, exist_ok=True)
+        trend_path.write_text(
+            _page("知乎情绪趋势", trend_body, TREND_PREFIX), encoding="utf-8"
+        )
+        trend_link = "zhihu/trend.html"
+
     (out_dir / "style.css").write_text(STYLE, encoding="utf-8")
     (out_dir / "index.html").write_text(
-        _render_index(entries, report_links), encoding="utf-8"
+        _render_index(entries, report_links, trend_link), encoding="utf-8"
     )
     return len(entries)
