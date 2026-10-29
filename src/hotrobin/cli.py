@@ -36,11 +36,17 @@ def _load_dotenv(path: Path = Path(".env")) -> None:
 
 
 def _resolve_run(data_dir: Path, run: str | None) -> Path:
+    base = data_dir / "zhihu"
     if run:
-        run_dir = data_dir / "zhihu" / run
-        if not (run_dir / "snapshot.json").exists():
-            raise SystemExit(f"找不到运行目录：{run_dir}")
-        return run_dir
+        candidate = base / run
+        if (candidate / "snapshot.json").exists():
+            return candidate
+        matches = sorted(base.glob(f"*/*/{run}/snapshot.json"))
+        if len(matches) == 1:
+            return matches[0].parent
+        if len(matches) > 1:
+            raise SystemExit(f"找到多个同名运行，请用 年/月/运行名 指定：{run}")
+        raise SystemExit(f"找不到运行目录：{run}")
     return latest_run_dir(data_dir)
 
 
@@ -72,13 +78,17 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     answers_parser = sub.add_parser("answers", help="抓取某次运行中问题的回答摘要")
     answers_parser.add_argument("--data-dir", type=Path, default=Path("data"))
-    answers_parser.add_argument("--run", help="运行目录名，如 2026-10-28-214503；默认最新")
+    answers_parser.add_argument(
+        "--run", help="运行名或 年/月/运行名，如 2026/10/2026-10-28-214503；默认最新"
+    )
     answers_parser.add_argument("--limit", type=int, default=50, help="每个问题的摘要数，最大 50")
     answers_parser.add_argument("--max-questions", type=int, default=30)
 
     report_parser = sub.add_parser("report", help="为某次运行生成情绪分析报告")
     report_parser.add_argument("--data-dir", type=Path, default=Path("data"))
-    report_parser.add_argument("--run", help="运行目录名；默认最新")
+    report_parser.add_argument(
+        "--run", help="运行名或 年/月/运行名；默认最新"
+    )
     report_parser.add_argument("--batch-size", type=int, default=5)
     report_parser.add_argument("--answers-per-question", type=int, default=20)
 

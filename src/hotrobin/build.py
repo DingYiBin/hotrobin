@@ -5,6 +5,7 @@ from __future__ import annotations
 import html
 import json
 import re
+import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,9 @@ PLATFORM_NAMES = {
     "zhihu": "知乎",
     "weibo": "微博",
 }
+
+# Pages live at <out>/<platform>/<year>/<month>/, three levels below site/.
+PAGE_PREFIX = "../../../"
 
 STYLE = """
 :root {
@@ -152,14 +156,14 @@ def _slug(platform: str) -> str:
     return slug or "platform"
 
 
-def _page(title: str, body: str) -> str:
+def _page(title: str, body: str, prefix: str = "") -> str:
     return f"""<!doctype html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{_escape(title)}</title>
-<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="{prefix}style.css">
 </head>
 <body>
 <main>
@@ -195,7 +199,7 @@ def _time_label(value: str) -> str:
         return value
 
 
-def _render_day(run_name: str, snapshot: Snapshot) -> str:
+def _render_day(run_name: str, snapshot: Snapshot, prefix: str) -> str:
     if snapshot.items:
         items = "\n".join(_render_item(item) for item in snapshot.items)
         items_html = f'<ol class="items">\n{items}\n</ol>'
@@ -206,13 +210,13 @@ def _render_day(run_name: str, snapshot: Snapshot) -> str:
     label = _time_label(snapshot.fetched_at)
     body = (
         "<header>\n"
-        '<a class="back" href="index.html">← 全部快照</a>\n'
+        f'<a class="back" href="{prefix}index.html">← 全部快照</a>\n'
         f"<h1>{_escape(platform)}热点 · {_escape(label)}</h1>\n"
         f'<p class="meta">运行 {_escape(run_name)} · 抓取时间：{_escape(snapshot.fetched_at)}</p>\n'
         "</header>\n"
         f"{items_html}"
     )
-    return _page(f"{platform}热点 · {label}", body)
+    return _page(f"{platform}热点 · {label}", body, prefix)
 
 
 def _sentiment_css(sentiment: str) -> str:
@@ -245,7 +249,7 @@ def _question_links(question_ids: Any, by_id: dict[str, dict]) -> str:
     return f'<p class="question-links">{links}</p>' if links else ""
 
 
-def _render_report(run_name: str, report: dict) -> str:
+def _render_report(run_name: str, report: dict, prefix: str) -> str:
     label = _time_label(
         str(report.get("run_at") or report.get("generated_at") or report.get("date") or "")
     )
@@ -363,7 +367,7 @@ def _render_report(run_name: str, report: dict) -> str:
 
     body = (
         "<header>\n"
-        '<a class="back" href="index.html">← 全部快照</a>\n'
+        f'<a class="back" href="{prefix}index.html">← 全部快照</a>\n'
         f"<h1>知乎情绪日报 · {_escape(label)}</h1>\n"
         f'<p class="meta">运行 {_escape(run_name)} · {_escape(meta)}</p>\n'
         "</header>\n"
@@ -379,20 +383,20 @@ def _render_report(run_name: str, report: dict) -> str:
         f'<ol class="report-items">{"".join(question_items)}</ol>\n'
         "</section>"
     )
-    return _page(f"知乎情绪日报 · {label}", body)
+    return _page(f"知乎情绪日报 · {label}", body, prefix)
 
 
 def _load_reports(data_dir: Path) -> list[tuple[str, dict]]:
     reports: list[tuple[str, dict]] = []
-    for path in data_dir.glob("*/*/report.json"):
+    for path in data_dir.glob("*/*/*/*/report.json"):
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
         if not isinstance(data, dict):
             continue
-        data.setdefault("platform", path.parent.parent.name)
-        data.setdefault("date", path.parent.name)
+        data.setdefault("platform", path.parent.parent.parent.parent.name)
+        data.setdefault("date", path.parent.name[:10])
         reports.append((path.parent.name, data))
     reports.sort(
         key=lambda pair: str(
@@ -412,7 +416,7 @@ def _render_index(
         body = (
             f"<h1>{title}</h1>\n"
             '<p class="empty">还没有数据。把快照放到 '
-            "<code>data/&lt;platform&gt;/&lt;run&gt;/snapshot.json</code> "
+            "<code>data/&lt;platform&gt;/&lt;year&gt;/&lt;month&gt;/&lt;run&gt;/snapshot.json</code> "
             "后运行 <code>hotrobin build</code>。</p>"
         )
         return _page(title, body)
@@ -442,7 +446,7 @@ def _load_snapshots(data_dir: Path) -> list[tuple[str, Snapshot]]:
         raise SystemExit(f"数据目录不存在：{data_dir}")
 
     snapshots: list[tuple[str, Snapshot]] = []
-    for path in data_dir.glob("*/*/snapshot.json"):
+    for path in data_dir.glob("*/*/*/*/snapshot.json"):
         try:
             snapshot = load_snapshot(path)
         except (KeyError, TypeError, ValueError) as exc:
@@ -456,30 +460,50 @@ def _load_snapshots(data_dir: Path) -> list[tuple[str, Snapshot]]:
 def build_site(data_dir: Path, out_dir: Path) -> int:
     """Render all snapshots under ``data_dir`` into ``out_dir``.
 
+    ``index.html`` stays at the root; run pages live under
+    ``<platform>/<year>/<month>/``. The generated tree is rebuilt from
+    scratch on every call.
+
     Returns the number of snapshot pages written.
     """
     snapshots = _load_snapshots(data_dir)
     reports = _load_reports(data_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    for stale in out_dir.glob("*.html"):
-        stale.unlink()
+    for entry in out_dir.iterdir():
+        if entry.is_dir():
+            shutil.rmtree(entry)
+        elif entry.suffix in (".html", ".css"):
+            entry.unlink()
 
     entries: list[tuple[str, Snapshot, str]] = []
     for run_name, snapshot in snapshots:
-        filename = f"{run_name}-{_slug(snapshot.platform)}.html"
-        (out_dir / filename).write_text(
-            _render_day(run_name, snapshot), encoding="utf-8"
+        date = snapshot.date
+        rel_dir = Path(_slug(snapshot.platform)) / date[:4] / date[5:7]
+        (out_dir / rel_dir).mkdir(parents=True, exist_ok=True)
+        filename = f"{run_name}.html"
+        (out_dir / rel_dir / filename).write_text(
+            _render_day(run_name, snapshot, PAGE_PREFIX), encoding="utf-8"
         )
-        entries.append((run_name, snapshot, filename))
+        entries.append((run_name, snapshot, f"{rel_dir.as_posix()}/{filename}"))
 
     report_links: dict[tuple[str, str], str] = {}
     for run_name, report in reports:
         platform = str(report.get("platform") or "")
-        filename = f"{run_name}-{_slug(platform)}-report.html"
-        (out_dir / filename).write_text(
-            _render_report(run_name, report), encoding="utf-8"
+        value = str(
+            report.get("date")
+            or report.get("run_at")
+            or report.get("generated_at")
+            or run_name
         )
-        report_links[(run_name, platform)] = filename
+        year = value[:4] if len(value) >= 4 else "unknown"
+        month = value[5:7] if len(value) >= 7 else "unknown"
+        rel_dir = Path(_slug(platform)) / year / month
+        (out_dir / rel_dir).mkdir(parents=True, exist_ok=True)
+        filename = f"{run_name}-report.html"
+        (out_dir / rel_dir / filename).write_text(
+            _render_report(run_name, report, PAGE_PREFIX), encoding="utf-8"
+        )
+        report_links[(run_name, platform)] = f"{rel_dir.as_posix()}/{filename}"
 
     (out_dir / "style.css").write_text(STYLE, encoding="utf-8")
     (out_dir / "index.html").write_text(

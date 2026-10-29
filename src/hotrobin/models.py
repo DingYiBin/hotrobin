@@ -112,16 +112,18 @@ def load_snapshot(path: Path) -> Snapshot:
 
 
 def save_snapshot(snapshot: Snapshot, data_dir: Path) -> Path:
-    """Write a snapshot to a fresh ``data/<platform>/<run_id>/`` directory.
+    """Write a snapshot to ``data/<platform>/<year>/<month>/<run_id>/``.
 
-    Every fetch gets its own timestamped directory; earlier runs are never
-    overwritten.
+    Every fetch gets its own timestamped run directory; earlier runs are
+    never overwritten.
     """
+    date = snapshot.date
+    period = Path(date[:4]) / date[5:7]
     base = snapshot.run_id
-    run_dir = data_dir / snapshot.platform / base
+    run_dir = data_dir / snapshot.platform / period / base
     suffix = 2
     while run_dir.exists():
-        run_dir = data_dir / snapshot.platform / f"{base}-{suffix}"
+        run_dir = data_dir / snapshot.platform / period / f"{base}-{suffix}"
         suffix += 1
 
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -136,7 +138,7 @@ def save_snapshot(snapshot: Snapshot, data_dir: Path) -> Path:
 def latest_run_dir(data_dir: Path, platform: str = "zhihu") -> Path:
     """Return the directory of the newest snapshot run."""
     runs: list[tuple[str, Path]] = []
-    for path in (data_dir / platform).glob("*/snapshot.json"):
+    for path in (data_dir / platform).glob("*/*/*/snapshot.json"):
         try:
             snapshot = load_snapshot(path)
         except (OSError, KeyError, TypeError, ValueError):

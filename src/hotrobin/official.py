@@ -38,6 +38,9 @@ ARTICLE_RE = re.compile(r"/p/(\d+)")
 DEFAULT_ANSWER_LIMIT = 50
 DEFAULT_MAX_QUESTIONS = 30
 REQUEST_DELAY = 0.3
+DEFERRED_RETRY_ROUNDS = 3
+DEFERRED_RETRY_DELAY = 3.0
+FATAL_CODES = {20001, 30001, 30002, 30003}
 
 
 class ZhihuAPIError(RuntimeError):
@@ -53,13 +56,15 @@ def _secret() -> str:
     return secret
 
 
-def _api_get(path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+def _api_get(
+    path: str, params: dict[str, Any] | None = None, *, attempts: int = 3
+) -> dict[str, Any]:
     url = BASE_URL + path
     if params:
         url += "?" + urllib.parse.urlencode(params)
+    attempts = max(1, attempts)
 
-    last_error: Exception | None = None
-    for attempt in range(3):
+    for attempt in range(attempts):
         request = urllib.request.Request(
             url,
             headers={
@@ -73,17 +78,16 @@ def _api_get(path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
                 body = json.loads(response.read().decode("utf-8", "replace"))
         except urllib.error.HTTPError as exc:
             raw = exc.read()[:300].decode("utf-8", "replace")
-            if exc.code in (429, 500, 502, 503, 504) and attempt < 2:
+            if exc.code in (429, 500, 502, 503, 504) and attempt < attempts - 1:
                 time.sleep(2 * (attempt + 1))
-                last_error = exc
                 continue
             raise ZhihuAPIError(exc.code, raw) from exc
-        except urllib.error.URLError as exc:
-            if attempt < 2:
+        except (urllib.error.URLError, TimeoutError) as exc:
+            if attempt < attempts - 1:
                 time.sleep(2 * (attempt + 1))
-                last_error = exc
                 continue
-            raise SystemExit(f"请求知乎 API 失败：{exc.reason}") from exc
+            reason = getattr(exc, "reason", exc)
+            raise ZhihuAPIError("network", f"网络请求失败：{reason}") from exc
         except json.JSONDecodeError as exc:
             raise ZhihuAPIError("invalid-json", "响应不是合法 JSON") from exc
 
@@ -92,14 +96,7 @@ def _api_get(path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
             data = body.get("Data")
             return data if isinstance(data, dict) else {}
 
-        message = str(body.get("Message") or "")
-        if code == 30001 and attempt < 2:
-            time.sleep(3 * (attempt + 1))
-            last_error = ZhihuAPIError(code, message)
-            continue
-        raise ZhihuAPIError(code, message)
-
-    raise ZhihuAPIError("retry-exhausted", str(last_error))
+        raise ZhihuAPIError(code, str(body.get("Message") or ""))
 
 
 def _clean_url(url: str) -> str:
@@ -145,11 +142,14 @@ def fetch_hot_list(limit: int = 30) -> Snapshot:
     )
 
 
-def fetch_question_answers(question_url: str, limit: int = DEFAULT_ANSWER_LIMIT) -> list[AnswerDigest]:
+def fetch_question_answers(
+    question_url: str, limit: int = DEFAULT_ANSWER_LIMIT, *, attempts: int = 1
+) -> list[AnswerDigest]:
     """Fetch one page of answer summaries for a question (max 50)."""
     data = _api_get(
         "/api/v1/content/question_answers",
         {"QuestionUrl": question_url, "Offset": 0, "Limit": limit},
+        attempts=attempts,
     )
 
     answers: list[AnswerDigest] = []
@@ -166,6 +166,32 @@ def fetch_question_answers(question_url: str, limit: int = DEFAULT_ANSWER_LIMIT)
             )
         )
     return answers
+
+
+def _save_answers(answer_dir: Path, item: HotItem, answers: list[AnswerDigest]) -> None:
+    payload = QuestionAnswers(
+        question_url=item.url,
+        fetched_at=datetime.now(SHANGHAI_TZ).isoformat(timespec="seconds"),
+        answers=answers,
+    )
+    path = answer_dir / f"{item.id}.json"
+    path.write_text(
+        json.dumps(payload.to_dict(), ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _record_pending_abort(
+    run_dir: Path, pending: list[HotItem], code: int | str
+) -> None:
+    if not pending:
+        return
+    record_failure(
+        run_dir,
+        "answers",
+        f"{len(pending)} 个问题中止时仍未完成重试",
+        {"question_ids": [item.id for item in pending], "code": code},
+    )
 
 
 def collect_answers(
@@ -192,6 +218,8 @@ def collect_answers(
     answer_dir.mkdir(parents=True, exist_ok=True)
 
     fetched = skipped = failed = 0
+    pending: list[dict[str, Any]] = []
+
     for index, item in enumerate(questions, start=1):
         path = answer_dir / f"{item.id}.json"
         if path.exists():
@@ -199,34 +227,109 @@ def collect_answers(
             continue
 
         try:
-            answers = fetch_question_answers(item.url, limit=limit)
+            answers = fetch_question_answers(item.url, limit=limit, attempts=1)
         except ZhihuAPIError as exc:
-            record_failure(
-                run_dir,
-                "answers",
-                str(exc),
-                {"question_id": item.id, "code": exc.code},
-            )
-            if exc.code in (20001, 30001, 30002):
+            if exc.code in FATAL_CODES:
+                record_failure(
+                    run_dir,
+                    "answers",
+                    str(exc),
+                    {"question_id": item.id, "code": exc.code},
+                )
+                _record_pending_abort(
+                    run_dir, [entry["item"] for entry in pending], exc.code
+                )
                 raise SystemExit(str(exc)) from exc
-            print(f"  [{index}/{len(questions)}] 抓取失败 {item.id}: {exc}")
-            failed += 1
+            pending.append({"item": item, "code": exc.code, "message": str(exc)})
+            print(
+                f"  [{index}/{len(questions)}] {item.id}: {exc.code}，加入重试队列"
+            )
+            time.sleep(REQUEST_DELAY)
             continue
         except SystemExit as exc:
             record_failure(run_dir, "answers", str(exc), {"question_id": item.id})
+            _record_pending_abort(
+                run_dir, [entry["item"] for entry in pending], "system-exit"
+            )
             raise
 
-        payload = QuestionAnswers(
-            question_url=item.url,
-            fetched_at=datetime.now(SHANGHAI_TZ).isoformat(timespec="seconds"),
-            answers=answers,
-        )
-        path.write_text(
-            json.dumps(payload.to_dict(), ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
+        _save_answers(answer_dir, item, answers)
         fetched += 1
         print(f"  [{index}/{len(questions)}] {item.id}: {len(answers)} 条摘要")
         time.sleep(REQUEST_DELAY)
+
+    for round_index in range(1, DEFERRED_RETRY_ROUNDS + 1):
+        if not pending:
+            break
+        delay = DEFERRED_RETRY_DELAY * round_index
+        print(
+            f"  第 {round_index}/{DEFERRED_RETRY_ROUNDS} 轮重试，"
+            f"共 {len(pending)} 项，每次尝试前等待 {delay:g} 秒"
+        )
+        still_pending: list[dict[str, Any]] = []
+        for position, entry in enumerate(pending):
+            item = entry["item"]
+            print(f"    等待 {delay:g} 秒后重试 {item.id}")
+            time.sleep(delay)
+
+            try:
+                answers = fetch_question_answers(item.url, limit=limit, attempts=1)
+            except ZhihuAPIError as exc:
+                if exc.code in FATAL_CODES:
+                    record_failure(
+                        run_dir,
+                        "answers",
+                        str(exc),
+                        {
+                            "question_id": item.id,
+                            "code": exc.code,
+                            "round": round_index,
+                        },
+                    )
+                    remaining = [
+                        pending_item["item"]
+                        for pending_item in pending[position + 1 :]
+                    ] + [pending_item["item"] for pending_item in still_pending]
+                    _record_pending_abort(run_dir, remaining, exc.code)
+                    raise SystemExit(str(exc)) from exc
+
+                still_pending.append(
+                    {"item": item, "code": exc.code, "message": str(exc)}
+                )
+                print(f"    仍失败 {item.id}: {exc}")
+                continue
+            except SystemExit as exc:
+                record_failure(
+                    run_dir,
+                    "answers",
+                    str(exc),
+                    {"question_id": item.id, "round": round_index},
+                )
+                remaining = [
+                    pending_item["item"] for pending_item in pending[position + 1 :]
+                ] + [pending_item["item"] for pending_item in still_pending]
+                _record_pending_abort(run_dir, remaining, "system-exit")
+                raise
+
+            _save_answers(answer_dir, item, answers)
+            fetched += 1
+            print(f"    重试成功 {item.id}: {len(answers)} 条摘要")
+
+        pending = still_pending
+
+    for entry in pending:
+        record_failure(
+            run_dir,
+            "answers",
+            entry["message"],
+            {
+                "question_id": entry["item"].id,
+                "code": entry["code"],
+                "rounds": DEFERRED_RETRY_ROUNDS,
+            },
+        )
+        failed += 1
+    if pending:
+        print(f"  重试结束，仍有 {len(pending)} 项失败")
 
     return fetched, skipped, failed

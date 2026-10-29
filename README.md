@@ -38,6 +38,8 @@ uv run hotrobin report [--run ID]     # 生成情绪报告，默认最新运行
 uv run hotrobin build                 # 渲染全部运行
 ```
 
+`--run` 可以用完整路径（如 `2026/10/2026-10-28-214503`）或只写运行名。
+
 ## 定时
 
 在 `.env` 中设置 `HOTROBIN_DAILY_AT`（24 小时制 `HH:MM`，北京时间，默认 `07:30`），多个时间用逗号分隔：
@@ -57,16 +59,25 @@ uv run hotrobin schedule
 ## 失败处理
 
 - 运行中的失败记录在运行目录的 `failures.json`；抓取热榜前就失败则记录到 `data/zhihu/failures/<时间>.json`
+- 抓取回答时，主循环不区分错误类型：除致命码外，失败都进入重试队列，并继续抓其他题
+- 命中 `20001` / `30001` / `30002` / `30003` 时立即中止本轮，不重试
+- 延后阶段最多 3 轮：每轮对每个待重试题先等待（3 秒 × 轮次）再尝试；3 轮后仍失败才记录
 - 配置 `HOTROBIN_NOTIFY_WEBHOOK` 后，每轮有失败会发送一条通知（支持 Server酱、Slack/Discord incoming webhook；其他地址按 `{"text": "..."}` 发送）
-- 不会自动重试；需要时可对同一运行重跑 `answers` / `report`
+- 需要时可对同一运行重跑 `answers` / `report`
 
 ## 数据
 
-每次运行一个独立目录，例如 `data/zhihu/2026-10-28-214503/`：
+每次运行一个独立目录，按年/月归档，例如 `data/zhihu/2026/10/2026-10-28-214503/`：
 
 - `snapshot.json`：热榜快照
 - `answers/<问题ID>.json`：回答摘要
 - `report.json`：逐题情绪分析与当日汇总，含每次模型调用的 token 用量
+
+生成的站点结构：
+
+- `site/index.html`：首页
+- `site/zhihu/<年>/<月>/<运行>.html`：热点页
+- `site/zhihu/<年>/<月>/<运行>-report.html`：情绪日报
 
 数据不进入 git，只保存在运行机器上。`site/` 是生成产物，同样不入库。`serve` 默认监听 `0.0.0.0`（局域网可访问），仅本机访问用 `--host 127.0.0.1`。
 
