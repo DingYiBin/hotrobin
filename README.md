@@ -56,6 +56,16 @@ uv run hotrobin schedule
 
 每次触发都会新建一次运行。注意回答摘要免费额度为每日 100 次，一次完整运行约 30 次，建议每天不超过 3 次。进程需要保持运行（nohup、tmux 或 systemd）；WSL 重启后需重新启动。
 
+## 发布
+
+配置 `HOTROBIN_DEPLOY_CMD` 后，`daily` / `schedule` 在构建完成后会自动发布：
+
+```bash
+HOTROBIN_DEPLOY_CMD="wrangler deploy --name hotrobin --assets {site} --compatibility-date 2026-10-29 --keep-vars"
+```
+
+`{site}` 会替换为 `site/` 的绝对路径。发布失败会写入 `failures.json` 并触发通知；本地站点不受影响。发布后页面公网可访问。
+
 ## 趋势
 
 `build` 会生成 `site/zhihu/trend.html`：
@@ -68,8 +78,9 @@ uv run hotrobin schedule
 ## 失败处理
 
 - 运行中的失败记录在运行目录的 `failures.json`；抓取热榜前就失败则记录到 `data/zhihu/failures/<时间>.json`
+- 抓取回答前会查询 `question_discovery` 剩余额度：不足时只抓前 N 题；为 0 时跳过回答抓取并记录原因
 - 抓取回答时，主循环不区分错误类型：除致命码外，失败都进入重试队列，并继续抓其他题
-- 命中 `20001` / `30001` / `30002` / `30003` 时立即中止本轮，不重试
+- 命中 `20001` / `30002` / `30003` 时立即中止本轮，不重试；`30001` 会再查一次额度，区分「当日额度耗尽」和「短时频率/并发限制」后中止
 - 延后阶段最多 3 轮：每轮对每个待重试题先等待（3 秒 × 轮次）再尝试；3 轮后仍失败才记录
 - 配置 `HOTROBIN_NOTIFY_WEBHOOK` 后，每轮有失败会发送一条通知（支持 Server酱、Slack/Discord incoming webhook；其他地址按 `{"text": "..."}` 发送）
 - 需要时可对同一运行重跑 `answers` / `report`

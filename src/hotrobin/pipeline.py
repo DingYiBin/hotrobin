@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from .build import build_site
+from .deploy import deploy_site
 from .failures import load_failures, notify_failures, record_failure
 from .models import save_snapshot
 from .official import collect_answers, fetch_hot_list
@@ -39,6 +40,10 @@ def run_daily(data_dir: Path, out_dir: Path) -> None:
         step = "build"
         count = build_site(data_dir, out_dir)
         print(f"已生成 {count} 个快照页面 -> {out_dir}")
+
+        step = "deploy"
+        if deploy_site(out_dir):
+            print("已发布到远端")
     except (SystemExit, Exception) as exc:
         if run_dir is None:
             failure_path = record_failure(None, step, str(exc), data_dir=data_dir)

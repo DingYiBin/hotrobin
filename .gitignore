@@ -9,6 +9,9 @@ data/
 # 生成的静态站点
 site/
 
+# Cloudflare wrangler 本地状态
+.wrangler/
+
 # 环境变量
 .env
 .env.*

@@ -40,7 +40,7 @@ DEFAULT_MAX_QUESTIONS = 30
 REQUEST_DELAY = 0.3
 DEFERRED_RETRY_ROUNDS = 3
 DEFERRED_RETRY_DELAY = 3.0
-FATAL_CODES = {20001, 30001, 30002, 30003}
+FATAL_CODES = {20001, 30002, 30003}
 
 
 class ZhihuAPIError(RuntimeError):
@@ -58,7 +58,7 @@ def _secret() -> str:
 
 def _api_get(
     path: str, params: dict[str, Any] | None = None, *, attempts: int = 3
-) -> dict[str, Any]:
+) -> Any:
     url = BASE_URL + path
     if params:
         url += "?" + urllib.parse.urlencode(params)
@@ -93,8 +93,7 @@ def _api_get(
 
         code = body.get("Code")
         if code == 0:
-            data = body.get("Data")
-            return data if isinstance(data, dict) else {}
+            return body.get("Data")
 
         raise ZhihuAPIError(code, str(body.get("Message") or ""))
 
@@ -109,9 +108,44 @@ def _content_id(url: str) -> str:
     return match.group(1) if match else url
 
 
+def fetch_quota(api_id: str) -> dict[str, Any] | None:
+    """Fetch one quota row; returns ``None`` if it cannot be read."""
+    try:
+        data = _api_get("/api/v1/quota", {"APIIDs": api_id}, attempts=1)
+    except (ZhihuAPIError, SystemExit):
+        return None
+    if not isinstance(data, list):
+        return None
+    for item in data:
+        if isinstance(item, dict) and str(item.get("APIID")) == api_id:
+            return item
+    return None
+
+
+def remaining_quota(api_id: str) -> int | None:
+    item = fetch_quota(api_id)
+    if item is None:
+        return None
+    try:
+        return int(item.get("RemainingQuota") or 0)
+    except (TypeError, ValueError):
+        return None
+
+
+def _classify_30001() -> tuple[str, int | None]:
+    remaining = remaining_quota("question_discovery")
+    if remaining is None:
+        return "额度查询失败，无法区分每日额度与短时限流", None
+    if remaining <= 0:
+        return "当日回答额度已耗尽（剩余 0）", remaining
+    return f"短时频率/并发限制（当日剩余 {remaining}）", remaining
+
+
 def fetch_hot_list(limit: int = 30) -> Snapshot:
     """Fetch the current hot list and normalize it into a Snapshot."""
     data = _api_get("/api/v1/content/hot_list", {"Limit": limit})
+    if not isinstance(data, dict):
+        raise ZhihuAPIError("invalid-data", "热榜返回结构异常")
     raw_items = data.get("Items") or []
 
     items: list[HotItem] = []
@@ -151,6 +185,8 @@ def fetch_question_answers(
         {"QuestionUrl": question_url, "Offset": 0, "Limit": limit},
         attempts=attempts,
     )
+    if not isinstance(data, dict):
+        raise ZhihuAPIError("invalid-data", "回答接口返回结构异常")
 
     answers: list[AnswerDigest] = []
     for raw in data.get("Items") or []:
@@ -217,18 +253,60 @@ def collect_answers(
     answer_dir = run_dir / "answers"
     answer_dir.mkdir(parents=True, exist_ok=True)
 
-    fetched = skipped = failed = 0
+    skipped = 0
+    pending_questions: list[HotItem] = []
+    for item in questions:
+        if (answer_dir / f"{item.id}.json").exists():
+            skipped += 1
+        else:
+            pending_questions.append(item)
+
+    if not pending_questions:
+        return 0, skipped, 0
+
+    remaining = remaining_quota("question_discovery")
+    if remaining is not None:
+        if remaining <= 0:
+            message = "问题发现额度已用尽（RemainingQuota=0），跳过本轮回答抓取"
+            record_failure(
+                run_dir,
+                "answers",
+                message,
+                {"api_id": "question_discovery", "remaining_quota": remaining},
+            )
+            print(f"  {message}")
+            return 0, skipped, 0
+        if remaining < len(pending_questions):
+            print(
+                f"  问题发现额度剩余 {remaining} 次，本轮只抓前 {remaining} 题"
+            )
+            pending_questions = pending_questions[:remaining]
+
+    questions = pending_questions
+    fetched = failed = 0
     pending: list[dict[str, Any]] = []
 
     for index, item in enumerate(questions, start=1):
-        path = answer_dir / f"{item.id}.json"
-        if path.exists():
-            skipped += 1
-            continue
-
         try:
             answers = fetch_question_answers(item.url, limit=limit, attempts=1)
         except ZhihuAPIError as exc:
+            if exc.code == 30001:
+                label, remaining = _classify_30001()
+                message = f"{exc}（{label}）"
+                record_failure(
+                    run_dir,
+                    "answers",
+                    message,
+                    {
+                        "question_id": item.id,
+                        "code": exc.code,
+                        "remaining_quota": remaining,
+                    },
+                )
+                _record_pending_abort(
+                    run_dir, [entry["item"] for entry in pending], exc.code
+                )
+                raise SystemExit(message) from exc
             if exc.code in FATAL_CODES:
                 record_failure(
                     run_dir,
@@ -275,6 +353,26 @@ def collect_answers(
             try:
                 answers = fetch_question_answers(item.url, limit=limit, attempts=1)
             except ZhihuAPIError as exc:
+                if exc.code == 30001:
+                    label, remaining = _classify_30001()
+                    message = f"{exc}（{label}）"
+                    record_failure(
+                        run_dir,
+                        "answers",
+                        message,
+                        {
+                            "question_id": item.id,
+                            "code": exc.code,
+                            "remaining_quota": remaining,
+                            "round": round_index,
+                        },
+                    )
+                    remaining_items = [
+                        pending_item["item"]
+                        for pending_item in pending[position + 1 :]
+                    ] + [pending_item["item"] for pending_item in still_pending]
+                    _record_pending_abort(run_dir, remaining_items, exc.code)
+                    raise SystemExit(message) from exc
                 if exc.code in FATAL_CODES:
                     record_failure(
                         run_dir,
