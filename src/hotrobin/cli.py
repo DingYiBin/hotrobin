@@ -90,7 +90,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         "--run", help="运行名或 年/月/运行名；默认最新"
     )
     report_parser.add_argument("--batch-size", type=int, default=5)
-    report_parser.add_argument("--answers-per-question", type=int, default=20)
+    report_parser.add_argument("--answers-per-question", type=int, default=50)
 
     build_parser = sub.add_parser("build", help="把 data/ 渲染成静态站点")
     build_parser.add_argument("--data-dir", type=Path, default=Path("data"))
