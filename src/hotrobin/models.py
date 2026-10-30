@@ -1,7 +1,9 @@
 """Snapshot schema for hot-topic data.
 
-Each daily snapshot lives at ``data/<platform>/<YYYY-MM-DD>/snapshot.json``
-and looks like::
+Snapshots live at
+``data/<platform>/<year>/<month>/<logical-day>/snapshots/<run>.json``.
+A logical day starts at 04:00 Asia/Shanghai, so the 00:00–03:59 snapshots
+belong to the previous day. Each snapshot looks like::
 
     {
       "schema_version": 1,
@@ -31,6 +33,18 @@ from typing import Any
 
 SCHEMA_VERSION = 1
 SHANGHAI_TZ = timezone(timedelta(hours=8))
+DEFAULT_DAY_START_HOUR = 4
+
+
+def logical_day(fetched_at: str, day_start_hour: int = DEFAULT_DAY_START_HOUR) -> str:
+    """Return the logical day for a timestamp (04:00 boundary by default)."""
+    value = datetime.fromisoformat(fetched_at) - timedelta(hours=day_start_hour)
+    return value.date().isoformat()
+
+
+def day_directory(data_dir: Path, platform: str, day: str) -> Path:
+    """Return ``data/<platform>/<year>/<month>/<logical-day>``."""
+    return data_dir / platform / day[:4] / day[5:7] / day
 
 
 def _optional_int(value: Any) -> int | None:
@@ -111,42 +125,28 @@ def load_snapshot(path: Path) -> Snapshot:
     return Snapshot.from_dict(json.loads(path.read_text(encoding="utf-8")))
 
 
-def save_snapshot(snapshot: Snapshot, data_dir: Path) -> Path:
-    """Write a snapshot to ``data/<platform>/<year>/<month>/<run_id>/``.
-
-    Every fetch gets its own timestamped run directory; earlier runs are
-    never overwritten.
-    """
-    date = snapshot.date
-    period = Path(date[:4]) / date[5:7]
+def save_snapshot(
+    snapshot: Snapshot,
+    data_dir: Path,
+    *,
+    day_start_hour: int = DEFAULT_DAY_START_HOUR,
+) -> Path:
+    """Write a snapshot under its logical day's ``snapshots/`` directory."""
+    day = logical_day(snapshot.fetched_at, day_start_hour)
     base = snapshot.run_id
-    run_dir = data_dir / snapshot.platform / period / base
+    snapshots_dir = day_directory(data_dir, snapshot.platform, day) / "snapshots"
+    path = snapshots_dir / f"{base}.json"
     suffix = 2
-    while run_dir.exists():
-        run_dir = data_dir / snapshot.platform / period / f"{base}-{suffix}"
+    while path.exists():
+        path = snapshots_dir / f"{base}-{suffix}.json"
         suffix += 1
 
-    run_dir.mkdir(parents=True, exist_ok=True)
-    path = run_dir / "snapshot.json"
+    snapshots_dir.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps(snapshot.to_dict(), ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
     return path
-
-
-def latest_run_dir(data_dir: Path, platform: str = "zhihu") -> Path:
-    """Return the directory of the newest snapshot run."""
-    runs: list[tuple[str, Path]] = []
-    for path in (data_dir / platform).glob("*/*/*/snapshot.json"):
-        try:
-            snapshot = load_snapshot(path)
-        except (OSError, KeyError, TypeError, ValueError):
-            continue
-        runs.append((snapshot.fetched_at, path.parent))
-    if not runs:
-        raise SystemExit(f"没有找到 {platform} 快照，先运行 hotrobin fetch")
-    return max(runs)[1]
 
 
 @dataclass(frozen=True)
@@ -176,6 +176,9 @@ class QuestionAnswers:
     question_url: str
     fetched_at: str
     answers: list[AnswerDigest]
+    pages: int = 1
+    is_end: bool = True
+    next_offset: int | None = None
     schema_version: int = SCHEMA_VERSION
 
     @classmethod
@@ -184,6 +187,9 @@ class QuestionAnswers:
             question_url=str(raw.get("question_url") or ""),
             fetched_at=str(raw.get("fetched_at") or ""),
             answers=[AnswerDigest.from_dict(item) for item in raw.get("answers") or []],
+            pages=int(raw.get("pages", 1) or 1),
+            is_end=bool(raw.get("is_end", True)),
+            next_offset=_optional_int(raw.get("next_offset")),
             schema_version=int(raw.get("schema_version", SCHEMA_VERSION)),
         )
 
@@ -192,6 +198,9 @@ class QuestionAnswers:
             "schema_version": self.schema_version,
             "question_url": self.question_url,
             "fetched_at": self.fetched_at,
+            "pages": self.pages,
+            "is_end": self.is_end,
+            "next_offset": self.next_offset,
             "answers": [answer.to_dict() for answer in self.answers],
         }
 

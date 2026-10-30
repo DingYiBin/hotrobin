@@ -1,157 +1,87 @@
-"""Render the sentiment trend page as static inline SVG.
-
-Each report is one point on a real-time axis; multiple runs on the same day
-therefore appear as multiple points spaced by their actual timestamps.
-"""
+"""Render the hot-topic trend page as static inline SVG."""
 
 from __future__ import annotations
 
 import html
-from datetime import datetime, timedelta
+import math
+from datetime import date, timedelta
 from typing import Any
 
-from .models import SHANGHAI_TZ
-
-SENTIMENTS = ("正面", "负面", "中性", "两极")
-COLORS = {
-    "正面": "#16a34a",
-    "负面": "#dc2626",
-    "中性": "#6b7280",
-    "两极": "#d97706",
-}
-
-MAX_GAP = timedelta(hours=36)
 CHART_WIDTH = 900
-CHART_HEIGHT = 320
-AREA_HEIGHT = 260
+CHART_HEIGHT = 300
 MARGIN_LEFT = 52
 MARGIN_RIGHT = 20
 MARGIN_TOP = 16
 MARGIN_BOTTOM = 34
 PLOT_WIDTH = CHART_WIDTH - MARGIN_LEFT - MARGIN_RIGHT
-POINT_TOOLTIP_LIMIT = 400
-TABLE_LIMIT = 500
+
+SERIES = (
+    ("new", "新增", "#16a34a"),
+    ("continuing", "持续", "#2563eb"),
+    ("retired", "退榜", "#dc2626"),
+)
 
 
 def _escape(value: Any) -> str:
     return html.escape(str(value))
 
 
-def _parse_time(report: dict[str, Any]) -> datetime | None:
-    raw = report.get("run_at") or report.get("generated_at") or report.get("date")
-    if not raw:
-        return None
-    try:
-        parsed = datetime.fromisoformat(str(raw))
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=SHANGHAI_TZ)
-    return parsed.astimezone(SHANGHAI_TZ)
+def _counts(report: dict) -> dict[str, int]:
+    counts = report.get("counts") or {}
+    return {
+        "new": int(counts.get("new") or len(report.get("new_topics") or [])),
+        "continuing": int(
+            counts.get("continuing") or len(report.get("continuing_topics") or [])
+        ),
+        "retired": int(counts.get("retired") or len(report.get("retired_topics") or [])),
+    }
 
 
-def _ratios(report: dict[str, Any]) -> dict[str, float] | None:
-    overall = report.get("overall") or {}
-    raw_ratios = overall.get("sentiment_ratios") or {}
-    values: dict[str, float] = {}
-
-    if raw_ratios:
-        for sentiment in SENTIMENTS:
-            try:
-                values[sentiment] = float(raw_ratios.get(sentiment) or 0)
-            except (TypeError, ValueError):
-                values[sentiment] = 0.0
-    else:
-        counts = overall.get("sentiment_counts") or {}
-        total = sum(float(counts.get(sentiment) or 0) for sentiment in SENTIMENTS)
-        if total <= 0:
-            return None
-        for sentiment in SENTIMENTS:
-            values[sentiment] = float(counts.get(sentiment) or 0) / total
-
-    total = sum(values.values())
-    if total <= 0:
-        return None
-    return {sentiment: value / total for sentiment, value in values.items()}
-
-
-def _points(reports: list[tuple[str, dict[str, Any]]]) -> list[dict[str, Any]]:
+def _points(days: list[tuple[str, str, dict, dict]]) -> list[dict[str, Any]]:
     points = []
-    for _run_name, report in reports:
-        if str(report.get("platform") or "zhihu") != "zhihu":
+    for day, platform, report, _top in days:
+        if platform != "zhihu":
             continue
-        when = _parse_time(report)
-        ratios = _ratios(report)
-        if when is None or ratios is None:
+        try:
+            value = date.fromisoformat(day)
+        except ValueError:
             continue
-        points.append({"dt": when, "ratios": ratios})
-    points.sort(key=lambda point: point["dt"])
+        counts = _counts(report)
+        points.append({"date": value, "counts": counts})
+    points.sort(key=lambda point: point["date"])
     return points
 
 
-def _bounds(points: list[dict[str, Any]]) -> tuple[datetime, datetime]:
-    start = points[0]["dt"]
-    end = points[-1]["dt"]
-    if end - start < timedelta(hours=1):
-        start -= timedelta(hours=12)
-        end += timedelta(hours=12)
-    return start, end
-
-
-def _add_months(value: datetime, months: int) -> datetime:
+def _add_months(value: date, months: int) -> date:
     index = value.year * 12 + (value.month - 1) + months
     year, month = divmod(index, 12)
-    return value.replace(
-        year=year,
-        month=month + 1,
-        day=1,
-        hour=0,
-        minute=0,
-        second=0,
-        microsecond=0,
-    )
+    return date(year, month + 1, 1)
 
 
-def _time_ticks(start: datetime, end: datetime) -> list[tuple[datetime, str]]:
+def _time_ticks(start: date, end: date) -> list[tuple[date, str]]:
     span = end - start
-    ticks: list[tuple[datetime, str]] = []
-
-    if span <= timedelta(days=2):
-        step = timedelta(hours=6)
-        current = start.replace(hour=0, minute=0, second=0, microsecond=0)
-        while current < start:
-            current += step
-        while current <= end:
-            ticks.append((current, current.strftime("%m-%d %H:%M")))
-            current += step
-    elif span <= timedelta(days=60):
-        step = timedelta(days=7)
-        current = start.replace(hour=0, minute=0, second=0, microsecond=0)
-        current -= timedelta(days=current.weekday())
-        while current < start:
-            current += step
+    ticks: list[tuple[date, str]] = []
+    if span <= timedelta(days=60):
+        current = start
         while current <= end:
             ticks.append((current, current.strftime("%m-%d")))
-            current += step
+            current += timedelta(days=7)
     elif span <= timedelta(days=800):
-        current = _add_months(start, 0)
+        current = start.replace(day=1)
         while current < start:
             current = _add_months(current, 1)
         while current <= end:
             ticks.append((current, current.strftime("%Y-%m")))
             current = _add_months(current, 1)
     elif span <= timedelta(days=4000):
-        current = _add_months(start, 0)
-        current = current.replace(month=((current.month - 1) // 3) * 3 + 1)
+        current = start.replace(day=1, month=((start.month - 1) // 3) * 3 + 1)
         while current < start:
             current = _add_months(current, 3)
         while current <= end:
             ticks.append((current, current.strftime("%Y-%m")))
             current = _add_months(current, 3)
     else:
-        current = start.replace(
-            month=1, day=1, hour=0, minute=0, second=0, microsecond=0
-        )
+        current = start.replace(month=1, day=1)
         while current < start:
             current = current.replace(year=current.year + 1)
         while current <= end:
@@ -159,43 +89,41 @@ def _time_ticks(start: datetime, end: datetime) -> list[tuple[datetime, str]]:
             current = current.replace(year=current.year + 1)
 
     if len(ticks) < 2:
-        ticks = [
-            (start, start.strftime("%Y-%m-%d")),
-            (end, end.strftime("%Y-%m-%d")),
-        ]
+        ticks = [(start, start.isoformat()), (end, end.isoformat())]
     return ticks
 
 
-def _x(value: datetime, start: datetime, end: datetime) -> float:
-    total = (end - start).total_seconds() or 1
-    return MARGIN_LEFT + (value - start).total_seconds() / total * PLOT_WIDTH
+def _x(value: date, start: date, end: date) -> float:
+    total = (end - start).days or 1
+    return MARGIN_LEFT + (value - start).days / total * PLOT_WIDTH
 
 
-def _y(value: float, height: float) -> float:
-    return MARGIN_TOP + (1 - value) * height
+def _y(value: float, y_max: float, plot_height: float) -> float:
+    return MARGIN_TOP + (1 - value / y_max) * plot_height
 
 
 def _segments(points: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
-    segments: list[list[dict[str, Any]]] = []
-    current: list[dict[str, Any]] = []
-    previous: datetime | None = None
+    segments = []
+    current = []
+    previous = None
     for point in points:
-        if previous is not None and point["dt"] - previous > MAX_GAP:
+        if previous is not None and (point["date"] - previous).days > 1:
             if current:
                 segments.append(current)
             current = []
         current.append(point)
-        previous = point["dt"]
+        previous = point["date"]
     if current:
         segments.append(current)
     return segments
 
 
-def _axes_svg(start: datetime, end: datetime, height: int) -> str:
-    plot_height = height - MARGIN_TOP - MARGIN_BOTTOM
+def _axes_svg(start: date, end: date, y_max: int, step: int) -> str:
+    plot_height = CHART_HEIGHT - MARGIN_TOP - MARGIN_BOTTOM
     parts = []
-    for percent in (0, 25, 50, 75, 100):
-        y = _y(percent / 100, plot_height)
+    for index in range(5):
+        value = index * step
+        y = _y(value, y_max, plot_height)
         parts.append(
             f'<line x1="{MARGIN_LEFT}" y1="{y:.1f}" '
             f'x2="{MARGIN_LEFT + PLOT_WIDTH}" y2="{y:.1f}" '
@@ -203,39 +131,48 @@ def _axes_svg(start: datetime, end: datetime, height: int) -> str:
         )
         parts.append(
             f'<text x="{MARGIN_LEFT - 8}" y="{y + 4:.1f}" '
-            f'text-anchor="end" font-size="11">{percent}%</text>'
+            f'text-anchor="end" font-size="11">{value}</text>'
         )
     for tick, label in _time_ticks(start, end):
         x = _x(tick, start, end)
         parts.append(
-            f'<line x1="{x:.1f}" y1="{MARGIN_TOP}" '
-            f'x2="{x:.1f}" y2="{MARGIN_TOP + plot_height}" '
-            'stroke="currentColor" stroke-opacity="0.06"/>'
+            f'<line x1="{x:.1f}" y1="{MARGIN_TOP}" x2="{x:.1f}" '
+            f'y2="{MARGIN_TOP + plot_height}" stroke="currentColor" '
+            'stroke-opacity="0.06"/>'
         )
         parts.append(
-            f'<text x="{x:.1f}" y="{height - 10}" text-anchor="middle" '
+            f'<text x="{x:.1f}" y="{CHART_HEIGHT - 10}" text-anchor="middle" '
             f'font-size="11">{_escape(label)}</text>'
         )
     return "".join(parts)
 
 
-def _line_chart(
-    points: list[dict[str, Any]],
-    segments: list[list[dict[str, Any]]],
-    start: datetime,
-    end: datetime,
-) -> str:
-    plot_height = CHART_HEIGHT - MARGIN_TOP - MARGIN_BOTTOM
-    show_tooltips = len(points) <= POINT_TOOLTIP_LIMIT
-    parts = []
+def _chart(points: list[dict[str, Any]]) -> str:
+    if not points:
+        return '<p class="empty">还没有数据。</p>'
 
-    for sentiment in SENTIMENTS:
-        color = COLORS[sentiment]
+    start = points[0]["date"]
+    end = points[-1]["date"]
+    if start == end:
+        start -= timedelta(days=1)
+        end += timedelta(days=1)
+
+    max_value = max(
+        max(point["counts"][key] for key, _label, _color in SERIES)
+        for point in points
+    )
+    step = max(1, math.ceil(max_value / 4))
+    y_max = step * 4
+    plot_height = CHART_HEIGHT - MARGIN_TOP - MARGIN_BOTTOM
+    segments = _segments(points)
+
+    parts = []
+    for key, label, color in SERIES:
         for segment in segments:
             if len(segment) > 1:
                 coords = " ".join(
-                    f"{_x(point['dt'], start, end):.1f},"
-                    f"{_y(point['ratios'][sentiment], plot_height):.1f}"
+                    f"{_x(point['date'], start, end):.1f},"
+                    f"{_y(point['counts'][key], y_max, plot_height):.1f}"
                     for point in segment
                 )
                 parts.append(
@@ -243,73 +180,20 @@ def _line_chart(
                     'stroke-width="2" stroke-linejoin="round" '
                     'stroke-linecap="round"/>'
                 )
-            elif not show_tooltips:
-                point = segment[0]
-                parts.append(
-                    f'<circle cx="{_x(point["dt"], start, end):.1f}" '
-                    f'cy="{_y(point["ratios"][sentiment], plot_height):.1f}" '
-                    f'r="2.5" fill="{color}"/>'
-                )
-        if show_tooltips:
-            for point in points:
-                title = (
-                    f"{point['dt'].strftime('%Y-%m-%d %H:%M')} "
-                    f"{sentiment} {point['ratios'][sentiment] * 100:.1f}%"
-                )
-                parts.append(
-                    f'<circle cx="{_x(point["dt"], start, end):.1f}" '
-                    f'cy="{_y(point["ratios"][sentiment], plot_height):.1f}" '
-                    f'r="2.5" fill="{color}">'
-                    f"<title>{_escape(title)}</title></circle>"
-                )
+        for point in points:
+            title = (
+                f"{point['date'].isoformat()} {label} {point['counts'][key]}"
+            )
+            parts.append(
+                f'<circle cx="{_x(point["date"], start, end):.1f}" '
+                f'cy="{_y(point["counts"][key], y_max, plot_height):.1f}" '
+                f'r="2.5" fill="{color}"><title>{_escape(title)}</title></circle>'
+            )
 
     return (
         f'<svg viewBox="0 0 {CHART_WIDTH} {CHART_HEIGHT}" '
-        'role="img" aria-label="四种情绪占比趋势折线图" class="trend-chart">'
-        + _axes_svg(start, end, CHART_HEIGHT)
-        + "".join(parts)
-        + "</svg>"
-    )
-
-
-def _area_chart(
-    segments: list[list[dict[str, Any]]],
-    start: datetime,
-    end: datetime,
-) -> str:
-    plot_height = AREA_HEIGHT - MARGIN_TOP - MARGIN_BOTTOM
-    parts = []
-
-    for segment in segments:
-        if len(segment) < 2:
-            continue
-        cumulative = [0.0] * len(segment)
-        for sentiment in SENTIMENTS:
-            lower = list(cumulative)
-            upper = [
-                lower[index] + segment[index]["ratios"][sentiment]
-                for index in range(len(segment))
-            ]
-            top_points = " ".join(
-                f"{_x(point['dt'], start, end):.1f},"
-                f"{_y(upper[index], plot_height):.1f}"
-                for index, point in enumerate(segment)
-            )
-            bottom_points = " ".join(
-                f"{_x(segment[index]['dt'], start, end):.1f},"
-                f"{_y(lower[index], plot_height):.1f}"
-                for index in range(len(segment) - 1, -1, -1)
-            )
-            parts.append(
-                f'<polygon points="{top_points} {bottom_points}" '
-                f'fill="{COLORS[sentiment]}" fill-opacity="0.75"/>'
-            )
-            cumulative = upper
-
-    return (
-        f'<svg viewBox="0 0 {CHART_WIDTH} {AREA_HEIGHT}" '
-        'role="img" aria-label="四种情绪构成堆叠面积图" class="trend-chart">'
-        + _axes_svg(start, end, AREA_HEIGHT)
+        'role="img" aria-label="每日新增、持续、退榜热点数量" class="trend-chart">'
+        + _axes_svg(start, end, y_max, step)
         + "".join(parts)
         + "</svg>"
     )
@@ -317,62 +201,90 @@ def _area_chart(
 
 def _legend() -> str:
     items = "".join(
-        f'<span class="legend-item"><i style="background:{COLORS[sentiment]}"></i>'
-        f"{_escape(sentiment)}</span>"
-        for sentiment in SENTIMENTS
+        f'<span class="legend-item"><i style="background:{color}"></i>'
+        f"{_escape(label)}</span>"
+        for _key, label, color in SERIES
     )
     return f'<div class="legend">{items}</div>'
 
 
-def _table(points: list[dict[str, Any]]) -> str:
+def _persistence(days: list[tuple[str, str, dict, dict]]) -> str:
+    topics: dict[str, dict[str, Any]] = {}
+    for day, platform, _report, top in days:
+        if platform != "zhihu":
+            continue
+        for entry in top.get("items") or []:
+            if not isinstance(entry, dict):
+                continue
+            question_id = str(entry.get("id") or "")
+            if not question_id:
+                continue
+            record = topics.get(question_id)
+            if record is None:
+                record = {
+                    "id": question_id,
+                    "title": str(entry.get("title") or ""),
+                    "url": str(entry.get("url") or ""),
+                    "days": set(),
+                    "best_rank": int(entry.get("best_rank") or 999),
+                    "appearances": 0,
+                }
+                topics[question_id] = record
+            record["days"].add(day)
+            record["best_rank"] = min(
+                record["best_rank"], int(entry.get("best_rank") or 999)
+            )
+            record["appearances"] += int(entry.get("appearances") or 0)
+
+    ranked = sorted(
+        (record for record in topics.values() if len(record["days"]) > 1),
+        key=lambda record: (
+            -len(record["days"]),
+            record["best_rank"],
+            -record["appearances"],
+        ),
+    )[:20]
+
+    if not ranked:
+        return '<p class="empty">还没有跨天持续的话题。</p>'
+
     rows = []
-    shown = points[-TABLE_LIMIT:]
-    for point in reversed(shown):
-        values = "".join(
-            f"<td>{point['ratios'][sentiment] * 100:.1f}%</td>"
-            for sentiment in SENTIMENTS
-        )
+    for record in ranked:
         rows.append(
-            f"<tr><td>{point['dt'].strftime('%Y-%m-%d %H:%M')}</td>{values}</tr>"
+            "<tr>"
+            f'<td><a href="{_escape(record["url"], quote=True)}" '
+            'target="_blank" rel="noopener noreferrer">'
+            f'{_escape(record["title"])}</a></td>'
+            f'<td class="num">{len(record["days"])}</td>'
+            f'<td class="num">{record["best_rank"]}</td>'
+            f'<td class="num">{record["appearances"]}</td>'
+            "</tr>"
         )
-    header = "".join(f"<th>{_escape(sentiment)}</th>" for sentiment in SENTIMENTS)
-    note = (
-        f"<p class=\"meta\">仅显示最近 {TABLE_LIMIT} 轮（共 {len(points)} 轮）</p>"
-        if len(points) > TABLE_LIMIT
-        else ""
-    )
     return (
-        f"<details><summary>逐轮数据（{len(points)} 轮）</summary>{note}"
-        f"<table><thead><tr><th>时间</th>{header}</tr></thead>"
-        f"<tbody>{''.join(rows)}</tbody></table></details>"
+        '<table><thead><tr><th>话题</th><th class="num">上榜天数</th>'
+        '<th class="num">最好名次</th><th class="num">出现次数</th></tr></thead>'
+        f'<tbody>{"".join(rows)}</tbody></table>'
     )
 
 
-def render_trend_body(reports: list[tuple[str, dict[str, Any]]]) -> str | None:
-    """Render the trend page body, or ``None`` if there is usable data."""
-    points = _points(reports)
+def render_trend_body(days: list[tuple[str, str, dict, dict]]) -> str | None:
+    points = _points(days)
     if not points:
         return None
 
-    start, end = _bounds(points)
-    segments = _segments(points)
-    line = _line_chart(points, segments, start, end)
-    area = _area_chart(segments, start, end) if len(points) >= 2 else ""
-
     body = (
         "<header>\n"
-        '<a class="back" href="../index.html">← 全部快照</a>\n'
-        "<h1>知乎情绪趋势</h1>\n"
-        f'<p class="meta">共 {len(points)} 轮采集 · '
-        f"{start.strftime('%Y-%m-%d %H:%M')} 至 {end.strftime('%Y-%m-%d %H:%M')} · "
-        "缺口超过 36 小时断开</p>\n"
+        '<a class="back" href="../index.html">← 全部日报</a>\n'
+        "<h1>知乎热点趋势</h1>\n"
+        f'<p class="meta">共 {len(points)} 个逻辑日 · '
+        "新增/持续按 Top 100 统计，退榜按昨日全部题目统计</p>\n"
         "</header>\n"
         f"{_legend()}\n"
-        '<section><h2>情绪占比趋势</h2>\n'
-        f"{line}\n"
+        '<section><h2>每日新增 / 持续 / 退榜</h2>\n'
+        f"{_chart(points)}\n"
         "</section>\n"
+        '<section><h2>跨天持续话题</h2>\n'
+        f"{_persistence(days)}\n"
+        "</section>"
     )
-    if area:
-        body += f'<section><h2>情绪构成</h2>\n{area}\n</section>\n'
-    body += f'<section><h2>数据</h2>\n{_table(points)}\n</section>'
     return body

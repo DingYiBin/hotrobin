@@ -7,15 +7,13 @@ import functools
 import http.server
 import os
 from collections.abc import Sequence
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from .build import build_site
-from .failures import load_failures, notify_failures, record_failure
-from .models import latest_run_dir, save_snapshot
-from .official import collect_answers, fetch_hot_list
-from .pipeline import run_daily
-from .report import generate_report
-from .schedule import run_scheduler
+from .daily import run_daily_summary, run_snapshot
+from .models import SHANGHAI_TZ, logical_day
+from .schedule import parse_summary_at, run_scheduler
 
 
 def _load_dotenv(path: Path = Path(".env")) -> None:
@@ -35,19 +33,14 @@ def _load_dotenv(path: Path = Path(".env")) -> None:
             os.environ.setdefault(key, value)
 
 
-def _resolve_run(data_dir: Path, run: str | None) -> Path:
-    base = data_dir / "zhihu"
-    if run:
-        candidate = base / run
-        if (candidate / "snapshot.json").exists():
-            return candidate
-        matches = sorted(base.glob(f"*/*/{run}/snapshot.json"))
-        if len(matches) == 1:
-            return matches[0].parent
-        if len(matches) > 1:
-            raise SystemExit(f"找到多个同名运行，请用 年/月/运行名 指定：{run}")
-        raise SystemExit(f"找不到运行目录：{run}")
-    return latest_run_dir(data_dir)
+def _day_start_hour() -> int:
+    return parse_summary_at(os.environ.get("HOTROBIN_SUMMARY_AT", "04:00"))[0]
+
+
+def _last_ended_day(day_start_hour: int) -> str:
+    now = datetime.now(SHANGHAI_TZ).isoformat()
+    current = logical_day(now, day_start_hour)
+    return (date.fromisoformat(current) - timedelta(days=1)).isoformat()
 
 
 def _serve(site_dir: Path, host: str, port: int) -> None:
@@ -68,29 +61,22 @@ def _serve(site_dir: Path, host: str, port: int) -> None:
 def main(argv: Sequence[str] | None = None) -> None:
     _load_dotenv()
     parser = argparse.ArgumentParser(
-        prog="hotrobin", description="每日热点抓取、总结与浏览"
+        prog="hotrobin", description="每日热点抓取、变化总结与浏览"
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    fetch_parser = sub.add_parser("fetch", help="抓取官方知乎热榜并新建一次运行")
+    fetch_parser = sub.add_parser("fetch", help="抓取一次热榜并保存快照")
     fetch_parser.add_argument("--data-dir", type=Path, default=Path("data"))
-    fetch_parser.add_argument("--limit", type=int, default=30, help="热榜条数，最大 30")
 
-    answers_parser = sub.add_parser("answers", help="抓取某次运行中问题的回答摘要")
-    answers_parser.add_argument("--data-dir", type=Path, default=Path("data"))
-    answers_parser.add_argument(
-        "--run", help="运行名或 年/月/运行名，如 2026/10/2026-10-28-214503；默认最新"
+    summary_parser = sub.add_parser(
+        "summary", help="生成某个逻辑日的热点变化日报"
     )
-    answers_parser.add_argument("--limit", type=int, default=50, help="每个问题的摘要数，最大 50")
-    answers_parser.add_argument("--max-questions", type=int, default=30)
-
-    report_parser = sub.add_parser("report", help="为某次运行生成情绪分析报告")
-    report_parser.add_argument("--data-dir", type=Path, default=Path("data"))
-    report_parser.add_argument(
-        "--run", help="运行名或 年/月/运行名；默认最新"
+    summary_parser.add_argument("--data-dir", type=Path, default=Path("data"))
+    summary_parser.add_argument("--out", type=Path, default=Path("site"))
+    summary_parser.add_argument(
+        "--date", help="逻辑日 YYYY-MM-DD；默认最近一个已结束的逻辑日"
     )
-    report_parser.add_argument("--batch-size", type=int, default=5)
-    report_parser.add_argument("--answers-per-question", type=int, default=50)
+    summary_parser.add_argument("--no-deploy", action="store_true")
 
     build_parser = sub.add_parser("build", help="把 data/ 渲染成静态站点")
     build_parser.add_argument("--data-dir", type=Path, default=Path("data"))
@@ -103,72 +89,30 @@ def main(argv: Sequence[str] | None = None) -> None:
     )
     serve_parser.add_argument("--port", type=int, default=20301)
 
-    daily_parser = sub.add_parser(
-        "daily", help="新建一次运行：抓取 -> 回答摘要 -> 情绪报告 -> 构建站点"
-    )
-    daily_parser.add_argument("--data-dir", type=Path, default=Path("data"))
-    daily_parser.add_argument("--out", type=Path, default=Path("site"))
-
     schedule_parser = sub.add_parser(
-        "schedule", help="按 .env 的 HOTROBIN_DAILY_AT 每天定时新建一次运行"
+        "schedule", help="按 HOTROBIN_FETCH_MINUTES / HOTROBIN_SUMMARY_AT 定时运行"
     )
     schedule_parser.add_argument("--data-dir", type=Path, default=Path("data"))
     schedule_parser.add_argument("--out", type=Path, default=Path("site"))
 
     args = parser.parse_args(argv)
+    day_start_hour = _day_start_hour()
 
     if args.command == "fetch":
-        try:
-            snapshot = fetch_hot_list(limit=args.limit)
-            path = save_snapshot(snapshot, args.data_dir)
-            print(
-                f"已抓取 {len(snapshot.items)} 条热榜，保存到 {path}"
-                f"（run {path.parent.name}）"
-            )
-        except (SystemExit, Exception) as exc:
-            failure_path = record_failure(
-                None, "fetch", str(exc), data_dir=args.data_dir
-            )
-            notify_failures(None, failure_path=failure_path)
-            raise
-    elif args.command == "answers":
-        run_dir = _resolve_run(args.data_dir, args.run)
-        try:
-            fetched, skipped, failed = collect_answers(
-                run_dir,
-                limit=args.limit,
-                max_questions=args.max_questions,
-            )
-            print(
-                f"回答摘要（{run_dir.name}）：新增 {fetched}，"
-                f"跳过 {skipped}，失败 {failed}"
-            )
-            notify_failures(run_dir)
-        except (SystemExit, Exception) as exc:
-            if not load_failures(run_dir):
-                record_failure(run_dir, "answers", str(exc))
-            notify_failures(run_dir)
-            raise
-    elif args.command == "report":
-        run_dir = _resolve_run(args.data_dir, args.run)
-        try:
-            path = generate_report(
-                run_dir,
-                batch_size=args.batch_size,
-                answers_per_question=args.answers_per_question,
-            )
-            print(f"报告：{path}")
-            notify_failures(run_dir)
-        except (SystemExit, Exception) as exc:
-            if not load_failures(run_dir):
-                record_failure(run_dir, "report", str(exc))
-            notify_failures(run_dir)
-            raise
+        run_snapshot(args.data_dir, day_start_hour=day_start_hour)
+    elif args.command == "summary":
+        day = args.date or _last_ended_day(day_start_hour)
+        path = run_daily_summary(
+            args.data_dir,
+            args.out,
+            day,
+            day_start_hour=day_start_hour,
+            deploy=not args.no_deploy,
+        )
+        print(f"日报：{path}")
     elif args.command == "build":
         count = build_site(args.data_dir, args.out)
-        print(f"已生成 {count} 个快照页面 -> {args.out}")
-    elif args.command == "daily":
-        run_daily(args.data_dir, args.out)
+        print(f"已生成 {count} 个日报页面 -> {args.out}")
     elif args.command == "schedule":
         run_scheduler(args.data_dir, args.out)
     else:

@@ -1,7 +1,10 @@
-"""Built-in daily scheduler configured through ``HOTROBIN_DAILY_AT``.
+"""Interval hot-list snapshots plus a daily summary at 04:00.
 
-The value is one or more 24-hour ``HH:MM`` times in Asia/Shanghai separated
-by commas, for example ``07:30`` or ``08:00,20:00``.
+Environment:
+
+- ``HOTROBIN_FETCH_MINUTES``: snapshot interval, default 30 minutes.
+- ``HOTROBIN_SUMMARY_AT``: daily summary time, default ``04:00``. This time
+  also defines the logical day boundary.
 """
 
 from __future__ import annotations
@@ -10,48 +13,61 @@ import os
 import re
 import sys
 import time
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from .models import SHANGHAI_TZ
-from .pipeline import run_daily
+from .daily import run_daily_summary, run_snapshot
+from .failures import record_failure
+from .models import SHANGHAI_TZ, day_directory, logical_day
 
-DEFAULT_DAILY_AT = "07:30"
+DEFAULT_FETCH_MINUTES = 30
+DEFAULT_SUMMARY_AT = "04:00"
 TIME_RE = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
-FULL_RUN_ANSWER_CALLS = 30
-FREE_DAILY_ANSWER_CALLS = 100
 
 
-def parse_daily_times(value: str) -> list[tuple[int, int]]:
-    times: list[tuple[int, int]] = []
-    for part in value.split(","):
-        part = part.strip()
-        if not part:
-            continue
-        match = TIME_RE.match(part)
-        if not match:
-            raise SystemExit(
-                "HOTROBIN_DAILY_AT 格式应为 HH:MM（24 小时制，多个时间用逗号分隔），"
-                f"当前为：{value!r}"
-            )
-        times.append((int(match.group(1)), int(match.group(2))))
-    if not times:
-        raise SystemExit("HOTROBIN_DAILY_AT 不能为空")
-    return sorted(set(times))
+def parse_summary_at(value: str) -> tuple[int, int]:
+    match = TIME_RE.match(value.strip())
+    if not match:
+        raise SystemExit(
+            f"HOTROBIN_SUMMARY_AT 格式应为 HH:MM（24 小时制），当前为：{value!r}"
+        )
+    return int(match.group(1)), int(match.group(2))
 
 
-def next_run(now: datetime, times: list[tuple[int, int]]) -> datetime:
-    candidates = []
-    for hour, minute in times:
-        target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-        if target < now:
-            target += timedelta(days=1)
-        candidates.append(target)
-    return min(candidates)
+def parse_fetch_minutes(value: str) -> int:
+    try:
+        minutes = int(value)
+    except ValueError as exc:
+        raise SystemExit(f"HOTROBIN_FETCH_MINUTES 应为整数，当前为：{value!r}") from exc
+    if minutes < 1:
+        raise SystemExit("HOTROBIN_FETCH_MINUTES 至少为 1")
+    return minutes
+
+
+def next_summary(now: datetime, hour: int, minute: int) -> datetime:
+    target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if target <= now:
+        target += timedelta(days=1)
+    return target
+
+
+def next_fetch_tick(
+    now: datetime, hour: int, minute: int, interval_minutes: int
+) -> datetime:
+    base = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if base > now:
+        base -= timedelta(days=1)
+    step = interval_minutes * 60
+    elapsed = (now - base).total_seconds()
+    return base + timedelta(seconds=(int(elapsed // step) + 1) * step)
+
+
+def last_ended_day(now: datetime, day_start_hour: int) -> str:
+    current = logical_day(now.isoformat(), day_start_hour)
+    return (date.fromisoformat(current) - timedelta(days=1)).isoformat()
 
 
 def _ancestor_pids() -> set[int]:
-    """Return the current process and its ancestors (uv, shell, ...)."""
     ancestors: set[int] = set()
     pid = os.getpid()
     while pid > 1:
@@ -66,7 +82,6 @@ def _ancestor_pids() -> set[int]:
 
 
 def _is_scheduler_cmdline(parts: list[str]) -> bool:
-    """Match ``python .../hotrobin schedule`` without matching e.g. grep."""
     if not parts or "python" not in Path(parts[0]).name.lower():
         return False
     return any(
@@ -76,7 +91,6 @@ def _is_scheduler_cmdline(parts: list[str]) -> bool:
 
 
 def find_other_schedulers() -> list[tuple[int, str]]:
-    """Find other ``hotrobin schedule`` processes in the same project."""
     proc_root = Path("/proc")
     if not proc_root.is_dir():
         return []
@@ -102,8 +116,38 @@ def find_other_schedulers() -> list[tuple[int, str]]:
     return found
 
 
+def _run_snapshot(data_dir: Path, day_start_hour: int) -> Path | None:
+    print(f"[{datetime.now(SHANGHAI_TZ).isoformat(timespec='minutes')}] 抓取热榜")
+    try:
+        return run_snapshot(data_dir, day_start_hour=day_start_hour)
+    except (SystemExit, Exception) as exc:
+        record_failure(None, "snapshot", str(exc), data_dir=data_dir)
+        print(f"抓取失败：{exc}")
+        return None
+
+
+def _run_summary(
+    data_dir: Path,
+    out_dir: Path,
+    day: str,
+    day_start_hour: int,
+    *,
+    boundary_path: Path | None = None,
+) -> None:
+    print(f"[{datetime.now(SHANGHAI_TZ).isoformat(timespec='minutes')}] 生成 {day} 日报")
+    try:
+        run_daily_summary(
+            data_dir,
+            out_dir,
+            day,
+            day_start_hour=day_start_hour,
+            boundary_path=boundary_path,
+        )
+    except (SystemExit, Exception) as exc:
+        print(f"日报生成失败（{day}）：{exc}")
+
+
 def run_scheduler(data_dir: Path, out_dir: Path) -> None:
-    # Make progress visible when stdout is redirected to a log file (nohup/systemd).
     sys.stdout.reconfigure(line_buffering=True)
 
     others = find_other_schedulers()
@@ -113,32 +157,54 @@ def run_scheduler(data_dir: Path, out_dir: Path) -> None:
             print(f"  PID {pid}: {cmdline[:160]}")
         print('  请只保留一个；多余的可执行 pkill -f "hotrobin schedule" 后重启。')
 
-    times = parse_daily_times(os.environ.get("HOTROBIN_DAILY_AT", DEFAULT_DAILY_AT))
-    pretty = "、".join(f"{hour:02d}:{minute:02d}" for hour, minute in times)
-    print(f"定时任务已启动：每天 {pretty}（Asia/Shanghai）运行 daily，Ctrl+C 退出")
+    summary_hour, summary_minute = parse_summary_at(
+        os.environ.get("HOTROBIN_SUMMARY_AT", DEFAULT_SUMMARY_AT)
+    )
+    interval = parse_fetch_minutes(
+        os.environ.get("HOTROBIN_FETCH_MINUTES", str(DEFAULT_FETCH_MINUTES))
+    )
+    print(
+        f"定时任务已启动：每 {interval} 分钟抓取热榜；"
+        f"每天 {summary_hour:02d}:{summary_minute:02d}（Asia/Shanghai）"
+        "生成上一逻辑日日报并发布"
+    )
+    if (24 * 60) // interval + 1 > 100:
+        print("提示：当前间隔每天抓取超过 100 次，可能超出热榜免费额度。")
 
-    max_runs = FREE_DAILY_ANSWER_CALLS // FULL_RUN_ANSWER_CALLS
-    if len(times) > max_runs:
-        print(
-            f"提示：每次完整运行约消耗 {FULL_RUN_ANSWER_CALLS} 次回答摘要额度，"
-            f"每日免费额度 {FREE_DAILY_ANSWER_CALLS} 次，建议每天不超过 {max_runs} 次。"
-        )
+    now = datetime.now(SHANGHAI_TZ)
+    missed_day = last_ended_day(now, summary_hour)
+    missed_dir = day_directory(data_dir, "zhihu", missed_day)
+    if (missed_dir / "snapshots").is_dir() and not (missed_dir / "report.json").exists():
+        print(f"补做漏掉的日报：{missed_day}")
+        _run_summary(data_dir, out_dir, missed_day, summary_hour)
 
     while True:
-        target = next_run(datetime.now(SHANGHAI_TZ), times)
-        print(f"下次运行：{target.isoformat(timespec='minutes')}")
+        now = datetime.now(SHANGHAI_TZ)
+        summary_at = next_summary(now, summary_hour, summary_minute)
+        fetch_at = next_fetch_tick(
+            now, summary_hour, summary_minute, interval
+        )
+        target = min(summary_at, fetch_at)
+        print(
+            f"下次任务：{target.isoformat(timespec='minutes')} "
+            f"（{'日报+快照' if summary_at <= fetch_at else '快照'}）"
+        )
 
         while True:
             remaining = (target - datetime.now(SHANGHAI_TZ)).total_seconds()
             if remaining <= 0:
                 break
-            # Wake up periodically so that clock changes and host sleep are handled.
             time.sleep(min(remaining, 30))
 
-        try:
-            run_daily(data_dir, out_dir)
-        except SystemExit as exc:
-            print(f"本轮失败（SystemExit）：{exc}")
-        except Exception as exc:  # keep the scheduler alive across failures
-            print(f"本轮失败：{exc!r}")
+        current = datetime.now(SHANGHAI_TZ)
+        if summary_at <= fetch_at:
+            # The boundary snapshot belongs to the new day and is also used
+            # as the closing point of the day being summarized.
+            boundary = _run_snapshot(data_dir, summary_hour)
+            day = last_ended_day(current, summary_hour)
+            _run_summary(
+                data_dir, out_dir, day, summary_hour, boundary_path=boundary
+            )
+        else:
+            _run_snapshot(data_dir, summary_hour)
         time.sleep(1)
