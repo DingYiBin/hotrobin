@@ -392,6 +392,12 @@ def _render_day(day: str, platform: str, report: dict, top: dict) -> str:
         f'{_topic_list(report.get("retired_topics") or [])}</section>\n'
     )
 
+    body += (
+        '<section><h2>Top 30 逐题分析</h2>\n'
+        f"{_render_analyses(analyses)}\n"
+        "</section>\n"
+    )
+
     themes = report.get("themes") or []
     if themes:
         theme_rows = []
@@ -419,9 +425,6 @@ def _render_day(day: str, platform: str, report: dict, top: dict) -> str:
     body += (
         '<section><h2>Top 100</h2>\n'
         f"{_render_table(items)}\n"
-        "</section>\n"
-        '<section><h2>Top 30 逐题分析</h2>\n'
-        f"{_render_analyses(analyses)}\n"
         "</section>"
     )
     return _page(f"{name}热点日报 · {day}", body, PAGE_PREFIX)

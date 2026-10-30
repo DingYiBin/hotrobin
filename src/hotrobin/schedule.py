@@ -132,7 +132,7 @@ def _run_summary(
     day: str,
     day_start_hour: int,
     *,
-    boundary_path: Path | None = None,
+    boundary_snapshot: Path | None = None,
 ) -> None:
     print(f"[{datetime.now(SHANGHAI_TZ).isoformat(timespec='minutes')}] 生成 {day} 日报")
     try:
@@ -141,7 +141,7 @@ def _run_summary(
             out_dir,
             day,
             day_start_hour=day_start_hour,
-            boundary_path=boundary_path,
+            boundary_snapshot=boundary_snapshot,
         )
     except (SystemExit, Exception) as exc:
         print(f"日报生成失败（{day}）：{exc}")
@@ -203,7 +203,7 @@ def run_scheduler(data_dir: Path, out_dir: Path) -> None:
             boundary = _run_snapshot(data_dir, summary_hour)
             day = last_ended_day(current, summary_hour)
             _run_summary(
-                data_dir, out_dir, day, summary_hour, boundary_path=boundary
+                data_dir, out_dir, day, summary_hour, boundary_snapshot=boundary
             )
         else:
             _run_snapshot(data_dir, summary_hour)

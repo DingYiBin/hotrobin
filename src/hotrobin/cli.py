@@ -6,6 +6,7 @@ import argparse
 import functools
 import http.server
 import os
+import sys
 from collections.abc import Sequence
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -59,6 +60,7 @@ def _serve(site_dir: Path, host: str, port: int) -> None:
 
 
 def main(argv: Sequence[str] | None = None) -> None:
+    sys.stdout.reconfigure(line_buffering=True)
     _load_dotenv()
     parser = argparse.ArgumentParser(
         prog="hotrobin", description="每日热点抓取、变化总结与浏览"

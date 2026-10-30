@@ -29,6 +29,7 @@ from .models import (
 )
 from .official import (
     DEFAULT_ANSWER_LIMIT,
+    AnswerPage,
     ZhihuAPIError,
     fetch_answer_page,
     fetch_hot_list,
@@ -39,9 +40,10 @@ TOP_LIMIT = 100
 ANALYZE_LIMIT = 30
 DEEP_PAGES_LIMIT = 10
 PAGE_LIMIT = DEFAULT_ANSWER_LIMIT
-REQUEST_DELAY = 0.3
+REQUEST_DELAY = 1.0
 DEFERRED_RETRY_ROUNDS = 3
 DEFERRED_RETRY_DELAY = 3.0
+RATE_LIMIT_COOLDOWN = 60.0
 FATAL_CODES = {20001, 30002, 30003}
 SUMMARY_CHAR_LIMIT = 300
 
@@ -389,6 +391,30 @@ def classify_30001() -> tuple[str, int | None]:
     return f"短时频率/并发限制（当日剩余 {remaining}）", remaining
 
 
+def _fetch_page(
+    item: dict[str, Any], offset: int
+) -> "AnswerPage":
+    """Fetch one page, cooling down once on a short-term 30001."""
+    attempts = 0
+    while True:
+        try:
+            return fetch_answer_page(
+                item["url"], offset=offset, limit=PAGE_LIMIT, attempts=1
+            )
+        except ZhihuAPIError as exc:
+            if exc.code != 30001:
+                raise
+            label, remaining = classify_30001()
+            if remaining is not None and remaining > 0 and attempts < 1:
+                attempts += 1
+                print(
+                    f"  {item['id']} 短时限流，等待 {RATE_LIMIT_COOLDOWN:g} 秒后重试 offset={offset}"
+                )
+                time.sleep(RATE_LIMIT_COOLDOWN)
+                continue
+            raise
+
+
 def _record_pending(day_dir: Path, entries: list[dict], code: int | str) -> None:
     ids = sorted({entry["item"]["id"] for entry in entries})
     if not ids:
@@ -501,9 +527,7 @@ def collect_day_answers(
             continue
 
         try:
-            page = fetch_answer_page(
-                item["url"], offset=0, limit=PAGE_LIMIT, attempts=1
-            )
+            page = _fetch_page(item, 0)
         except ZhihuAPIError as exc:
             if not _handle_api_error(exc, day_dir, item, 1, pending):
                 pending.append(
@@ -538,12 +562,7 @@ def collect_day_answers(
                 )
                 continue
             try:
-                page2 = fetch_answer_page(
-                    item["url"],
-                    offset=page.next_offset,
-                    limit=PAGE_LIMIT,
-                    attempts=1,
-                )
+                page2 = _fetch_page(item, page.next_offset)
             except ZhihuAPIError as exc:
                 if not _handle_api_error(exc, day_dir, item, 2, pending):
                     pending.append(
@@ -593,9 +612,7 @@ def collect_day_answers(
             time.sleep(delay)
 
             try:
-                page = fetch_answer_page(
-                    item["url"], offset=offset, limit=PAGE_LIMIT, attempts=1
-                )
+                page = _fetch_page(item, offset)
             except ZhihuAPIError as exc:
                 remaining_entries = pending[position + 1 :] + still_pending
                 if not _handle_api_error(
