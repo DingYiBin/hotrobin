@@ -60,6 +60,7 @@ a { color: var(--accent); text-decoration: none; }
 a:hover { text-decoration: underline; }
 h1 { font-size: 1.5rem; margin: 0.5rem 0 1rem; }
 h2 { font-size: 1.15rem; margin: 0 0 0.75rem; }
+h3 { font-size: 1rem; margin: 1rem 0 0.4rem; }
 header { margin-bottom: 1.5rem; }
 .back { font-size: 0.9rem; }
 .meta { color: var(--muted); font-size: 0.85rem; margin: 0.25rem 0; }
@@ -313,6 +314,55 @@ def _render_analyses(items: list[dict]) -> str:
     return "".join(cards) if cards else '<p class="empty">无</p>'
 
 
+def _render_movers(items: list[dict]) -> str:
+    if not items:
+        return '<p class="empty">无</p>'
+    rows = []
+    for entry in items:
+        score_delta = float(entry.get("score_delta") or 0)
+        rank_delta = int(entry.get("rank_delta") or 0)
+        meta = (
+            f'分数 {float(entry.get("prev_score") or 0):.2f} → '
+            f'{float(entry.get("score") or 0):.2f} ({score_delta:+.2f}) · '
+            f'最好名次 {entry.get("prev_best_rank", "?")} → '
+            f'{entry.get("best_rank", "?")} ({rank_delta:+d})'
+        )
+        rows.append(
+            "<li>"
+            f'<a href="{_escape(entry.get("url") or "", quote=True)}" '
+            'target="_blank" rel="noopener noreferrer">'
+            f'{_escape(entry.get("title") or "")}</a>'
+            f'<p class="meta">{_escape(meta)}</p>'
+            "</li>"
+        )
+    return f'<ul class="topic-list">{"".join(rows)}</ul>'
+
+
+def _render_day_over_day(report: dict) -> str:
+    dod = report.get("day_over_day") or {}
+    if not isinstance(dod, dict):
+        return ""
+
+    summary = str(dod.get("summary") or "")
+    meta_bits = []
+    if dod.get("previous_date"):
+        meta_bits.append(f"对比 {dod.get('previous_date')}")
+    if dod.get("unique_delta") is not None:
+        meta_bits.append(f"唯一题目较昨日 {int(dod.get('unique_delta')):+d}")
+    meta = " · ".join(meta_bits)
+
+    return (
+        '<section><h2>较昨日变化</h2>\n'
+        f"<p>{_escape(summary)}</p>\n"
+        + (f'<p class="meta">{_escape(meta)}</p>\n' if meta else "")
+        + "<h3>上升</h3>"
+        + _render_movers(dod.get("risers") or [])
+        + "<h3>下降</h3>"
+        + _render_movers(dod.get("fallers") or [])
+        + "\n</section>\n"
+    )
+
+
 def _render_day(day: str, platform: str, report: dict, top: dict) -> str:
     coverage = report.get("coverage") or {}
     window = report.get("window") or {}
@@ -333,6 +383,7 @@ def _render_day(day: str, platform: str, report: dict, top: dict) -> str:
         "</header>\n"
         f'<section class="overall"><h2>今日概览</h2>'
         f'<p>{_escape(report.get("overview") or "")}</p></section>\n'
+        f"{_render_day_over_day(report)}"
         '<section><h2>新增热点</h2>'
         f'{_topic_list(report.get("new_topics") or [])}</section>\n'
         '<section><h2>持续热点</h2>'

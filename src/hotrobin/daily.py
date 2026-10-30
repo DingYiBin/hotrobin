@@ -50,10 +50,10 @@ QUESTION_SYSTEM = """你是中文热点分析助手。输入是一个知乎热�
 输出 JSON：
 {"summary":"2-4句话概括讨论内容","key_points":["3-5条代表性观点"],"controversy":"主要分歧，没有则为null","topics":["1-3个议题标签"],"why_hot":"一句话说明为什么上榜"}"""
 
-AGG_SYSTEM = """你是中文热点变化分析助手。输入是某个逻辑日的知乎热榜统计、新增/持续/退榜题目和 Top30 逐题分析。
+AGG_SYSTEM = """你是中文热点变化分析助手。输入是某个逻辑日的知乎热榜统计、新增/持续/退榜题目、Top30 逐题分析，以及昨日报告（如果有）。
 只依据输入，不要编造。
 输出 JSON：
-{"overview":"3-5句话总结当天热点变化","themes":[{"topic":"议题名","summary":"概述","question_ids":["只能使用输入中出现过的 id"]}]}"""
+{"overview":"3-5句话总结当天热点变化","day_over_day":"3-5句话总结相较昨日的变化（新话题、退榜、排名升降、议题变化）；没有昨日数据时说明无法对比","themes":[{"topic":"议题名","summary":"概述","question_ids":["只能使用输入中出现过的 id"]}]}"""
 
 
 def day_window(day: str, day_start_hour: int) -> tuple[str, str]:
@@ -173,6 +173,84 @@ def load_previous_items(data_dir: Path, platform: str, day: str) -> dict[str, di
     if snapshots:
         return {entry["id"]: entry for entry in aggregate_snapshots(snapshots)}
     return {}
+
+
+def load_previous_summary(
+    data_dir: Path, platform: str, day: str
+) -> tuple[dict | None, dict | None]:
+    prev_dir = day_directory(data_dir, platform, previous_day(day))
+    report = None
+    top = None
+    report_path = prev_dir / "report.json"
+    if report_path.exists():
+        try:
+            loaded = json.loads(report_path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict) and loaded.get("schema_version") == 2:
+                report = loaded
+        except (OSError, ValueError):
+            pass
+    top_path = prev_dir / "top.json"
+    if top_path.exists():
+        try:
+            loaded = json.loads(top_path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                top = loaded
+        except (OSError, ValueError):
+            pass
+    return report, top
+
+
+def day_over_day_metrics(
+    continuing: list[dict[str, Any]],
+    previous_report: dict | None,
+    unique_today: int,
+) -> dict[str, Any]:
+    movers = []
+    for entry in continuing:
+        prev_score = entry.get("prev_score")
+        if prev_score is None:
+            continue
+        score_delta = float(entry["score"]) - float(prev_score)
+        best_rank = int(entry.get("best_rank") or 999)
+        prev_best = int(entry.get("prev_best_rank") or 999)
+        movers.append(
+            {
+                "id": entry["id"],
+                "title": entry["title"],
+                "url": entry.get("url") or "",
+                "score": round(float(entry["score"]), 3),
+                "prev_score": round(float(prev_score), 3),
+                "score_delta": round(score_delta, 3),
+                "best_rank": best_rank,
+                "prev_best_rank": prev_best,
+                "rank_delta": prev_best - best_rank,
+            }
+        )
+
+    risers = sorted(
+        (entry for entry in movers if entry["score_delta"] > 0),
+        key=lambda entry: entry["score_delta"],
+        reverse=True,
+    )[:5]
+    fallers = sorted(
+        (entry for entry in movers if entry["score_delta"] < 0),
+        key=lambda entry: entry["score_delta"],
+    )[:5]
+
+    unique_delta = None
+    if previous_report is not None:
+        previous_unique = (previous_report.get("coverage") or {}).get(
+            "unique_questions"
+        )
+        if previous_unique is not None:
+            unique_delta = unique_today - int(previous_unique)
+
+    return {
+        "previous_date": str(previous_report.get("date") or "") if previous_report else None,
+        "unique_delta": unique_delta,
+        "risers": risers,
+        "fallers": fallers,
+    }
 
 
 def build_top(
@@ -654,8 +732,29 @@ def aggregate_analysis(
     continuing: list[dict[str, Any]],
     retired: list[dict[str, Any]],
     analyze_items: list[dict[str, Any]],
-) -> tuple[str, list[dict[str, Any]], dict[str, Any]]:
+    previous_report: dict | None,
+    previous_top: dict | None,
+    day_over_day: dict[str, Any],
+) -> tuple[str, str, list[dict[str, Any]], dict[str, Any]]:
     known_ids = {item["id"] for item in top}
+    previous_context = None
+    if previous_report is not None:
+        previous_context = {
+            "date": previous_report.get("date"),
+            "overview": previous_report.get("overview") or "",
+            "themes": previous_report.get("themes") or [],
+            "top_items": [
+                {
+                    "id": item.get("id"),
+                    "title": item.get("title"),
+                    "score": item.get("score"),
+                    "best_rank": item.get("best_rank"),
+                }
+                for item in (previous_top or {}).get("items") or []
+                if isinstance(item, dict)
+            ][:20],
+        }
+
     payload = {
         "date": day,
         "counts": counts,
@@ -676,6 +775,8 @@ def aggregate_analysis(
             }
             for item in top
         ],
+        "previous_day": previous_context,
+        "day_over_day_metrics": day_over_day,
     }
     try:
         response = chat_json(AGG_SYSTEM, json.dumps(payload, ensure_ascii=False))
@@ -702,6 +803,7 @@ def aggregate_analysis(
         )
     return (
         str(data.get("overview") or ""),
+        str(data.get("day_over_day") or ""),
         themes,
         dict(response.usage, purpose="aggregate"),
     )
@@ -769,6 +871,9 @@ def run_daily_summary(
 
         items = aggregate_snapshots(snapshots)
         previous = load_previous_items(data_dir, platform, day)
+        previous_report, previous_top = load_previous_summary(
+            data_dir, platform, day
+        )
         top, retired_all = build_top(items, previous)
         new_items = [entry for entry in top if entry["status"] == "new"]
         continuing = [entry for entry in top if entry["status"] == "continuing"]
@@ -780,6 +885,9 @@ def run_daily_summary(
             "continuing": len(continuing),
             "retired": len(retired_all),
         }
+        dod_metrics = day_over_day_metrics(
+            continuing, previous_report, len(items)
+        )
 
         step = "answers"
         analyze_items = _apply_quota(day_dir, top[:ANALYZE_LIMIT])
@@ -789,7 +897,7 @@ def run_daily_summary(
         usages: list[dict[str, Any]] = []
         if analyze_items:
             usages.extend(analyze_questions(day_dir, analyze_items))
-            overview, themes, aggregate_usage = aggregate_analysis(
+            overview, dod_summary, themes, aggregate_usage = aggregate_analysis(
                 day_dir,
                 day,
                 counts=counts,
@@ -798,10 +906,18 @@ def run_daily_summary(
                 continuing=continuing,
                 retired=retired,
                 analyze_items=analyze_items,
+                previous_report=previous_report,
+                previous_top=previous_top,
+                day_over_day=dod_metrics,
             )
             usages.append(aggregate_usage)
         else:
             overview = "回答摘要额度不足，本日仅保留榜单统计。"
+            dod_summary = (
+                "回答额度不足，未生成模型对比分析。"
+                if previous_report is not None
+                else "无昨日数据，无法对比。"
+            )
             themes = []
 
         start, end = day_window(day, day_start_hour)
@@ -833,6 +949,7 @@ def run_daily_summary(
             },
             "counts": counts,
             "overview": overview,
+            "day_over_day": {"summary": dod_summary, **dod_metrics},
             "new_topics": [_compact(entry) for entry in new_items[:20]],
             "continuing_topics": [_compact(entry) for entry in continuing[:20]],
             "retired_topics": [_compact(entry) for entry in retired],

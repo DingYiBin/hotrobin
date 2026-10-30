@@ -22,8 +22,8 @@ SERIES = (
 )
 
 
-def _escape(value: Any) -> str:
-    return html.escape(str(value))
+def _escape(value: Any, quote: bool = True) -> str:
+    return html.escape(str(value), quote=quote)
 
 
 def _counts(report: dict) -> dict[str, int]:
