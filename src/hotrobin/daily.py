@@ -349,7 +349,7 @@ def _dedupe(
     seen: set[str] = set()
     result: list[AnswerDigest] = []
     for answer in [*base, *extra]:
-        key = answer.token or answer.url
+        key = answer.url or answer.token
         if key in seen:
             continue
         seen.add(key)
@@ -512,7 +512,20 @@ def collect_day_answers(
     for index, item in enumerate(analyze_items):
         existing = _load_answers(day_dir, item["id"])
         if existing is not None:
-            if existing.is_end:
+            planned_pages = 2 if index < DEEP_PAGES_LIMIT else 1
+            cleaned = _dedupe(existing.answers, [])[
+                : planned_pages * PAGE_LIMIT
+            ]
+            if len(cleaned) != len(existing.answers):
+                _save_answers(
+                    day_dir,
+                    item,
+                    cleaned,
+                    pages=existing.pages,
+                    is_end=existing.is_end,
+                    next_offset=existing.next_offset,
+                )
+            if existing.is_end or existing.pages >= planned_pages:
                 continue
             if index < DEEP_PAGES_LIMIT and existing.next_offset is not None:
                 pending.append(
@@ -705,7 +718,9 @@ def analyze_questions(
     day_dir: Path, analyze_items: list[dict[str, Any]]
 ) -> list[dict[str, Any]]:
     usages: list[dict[str, Any]] = []
-    for item in analyze_items:
+    total = len(analyze_items)
+    for index, item in enumerate(analyze_items, start=1):
+        print(f"    逐题分析 {index}/{total}: {item['id']}")
         answers = _load_answers(day_dir, item["id"])
         summaries = (
             [answer.summary[:SUMMARY_CHAR_LIMIT] for answer in answers.answers]
@@ -908,12 +923,16 @@ def run_daily_summary(
 
         step = "answers"
         analyze_items = _apply_quota(day_dir, top[:ANALYZE_LIMIT])
+        print(f"  回答抓取：{len(analyze_items)} 题")
         answers_count = collect_day_answers(day_dir, analyze_items)
+        print(f"  回答摘要：{answers_count} 条")
 
         step = "report"
         usages: list[dict[str, Any]] = []
         if analyze_items:
+            print(f"  逐题分析：{len(analyze_items)} 题")
             usages.extend(analyze_questions(day_dir, analyze_items))
+            print("  汇总分析…")
             overview, dod_summary, themes, aggregate_usage = aggregate_analysis(
                 day_dir,
                 day,

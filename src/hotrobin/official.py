@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import re
@@ -66,6 +67,11 @@ def _api_get(
                 continue
             reason = getattr(exc, "reason", exc)
             raise ZhihuAPIError("network", f"网络请求失败：{reason}") from exc
+        except (http.client.HTTPException, ConnectionError) as exc:
+            if attempt < attempts - 1:
+                time.sleep(2 * (attempt + 1))
+                continue
+            raise ZhihuAPIError("network", f"响应读取失败：{exc}") from exc
         except json.JSONDecodeError as exc:
             raise ZhihuAPIError("invalid-json", "响应不是合法 JSON") from exc
 

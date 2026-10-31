@@ -10,6 +10,7 @@ Reads configuration from the environment:
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import re
@@ -114,6 +115,11 @@ def chat_json(system: str, user: str) -> ChatResult:
                 time.sleep(2 * (attempt + 1))
                 continue
             raise SystemExit(f"DeepSeek 请求失败：{exc.reason}") from exc
+        except (http.client.HTTPException, ConnectionError) as exc:
+            if attempt < 2:
+                time.sleep(2 * (attempt + 1))
+                continue
+            raise SystemExit(f"DeepSeek 响应读取失败：{exc}") from exc
 
         try:
             choice = data["choices"][0]
