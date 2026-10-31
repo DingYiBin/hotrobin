@@ -79,7 +79,7 @@ section { margin-top: 2rem; }
 }
 .snapshots .date { font-variant-numeric: tabular-nums; font-weight: 600; }
 .snapshots .count { margin-left: auto; color: var(--muted); font-size: 0.85rem; }
-.topic-list li, .analysis {
+.topic-list > li {
   background: var(--card);
   border: 1px solid var(--border);
   border-radius: 10px;
@@ -100,6 +100,68 @@ section { margin-top: 2rem; }
 .tag.new { background: rgba(22, 163, 74, 0.14); color: var(--green); }
 .tag.continuing { background: rgba(37, 99, 235, 0.12); color: var(--blue); }
 .tag.retired { background: rgba(220, 38, 38, 0.12); color: var(--red); }
+.tag.up { background: rgba(22, 163, 74, 0.14); color: var(--green); }
+.tag.down { background: rgba(220, 38, 38, 0.12); color: var(--red); }
+.tag.flat { background: rgba(107, 114, 128, 0.18); color: var(--muted); }
+.tag.rank { background: rgba(37, 99, 235, 0.10); color: var(--blue); }
+.top-list { list-style: none; padding: 0; margin: 0; }
+.top-item {
+  display: flex;
+  gap: 0.6rem;
+  padding: 0.65rem 0.9rem;
+  margin-bottom: 0.5rem;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+.top-item .rank {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  min-width: 1.8rem;
+  text-align: right;
+}
+.top-body { flex: 1; min-width: 0; }
+.top-details > summary { list-style: none; cursor: pointer; }
+.top-details > summary::-webkit-details-marker { display: none; }
+.top-title { font-weight: 600; }
+.top-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  align-items: center;
+  color: var(--muted);
+  font-size: 0.85rem;
+  margin-top: 0.2rem;
+}
+.top-meta .tag { margin-right: 0; }
+.top-details .q-analysis { margin-left: 0; }
+.question-links { list-style: none; margin: 0.3rem 0 0; padding-left: 0; font-size: 0.9rem; }
+.question-links li { margin: 0.25rem 0; }
+.theme-question { display: flex; gap: 0.35rem; align-items: flex-start; }
+.q-marker {
+  flex: 0 0 1.15em;
+  width: 1.15em;
+  height: 1.15em;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+  font-size: 0.8em;
+  line-height: 1;
+  margin-top: 0.62rem;
+  transition: transform 0.15s;
+}
+.q-box {
+  flex: 1;
+  min-width: 0;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.3rem 0.75rem;
+}
+.q-analysis { margin: 0.3rem 0 0 1.3rem; font-size: 0.9rem; }
+.q-link { margin: 0 0 0.3rem; overflow-wrap: anywhere; }
+.q-link a { font-weight: 600; }
 table {
   width: 100%;
   border-collapse: collapse;
@@ -113,8 +175,6 @@ th, td {
 th { text-align: left; color: var(--muted); font-weight: 600; }
 td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 .spark { color: var(--muted); }
-.analysis .title { font-weight: 600; }
-.analysis ul { margin: 0.4rem 0 0; padding-left: 1.1rem; }
 .legend { display: flex; flex-wrap: wrap; gap: 0.9rem; margin: 0.75rem 0 0.25rem; font-size: 0.9rem; }
 .legend-item i {
   display: inline-block;
@@ -253,89 +313,99 @@ def _sparkline(history: list[dict]) -> str:
     )
 
 
-def _render_table(items: list[dict]) -> str:
-    rows = []
-    for index, entry in enumerate(items, start=1):
-        score = float(entry.get("score") or 0)
-        rows.append(
-            "<tr>"
-            f'<td class="num">{index}</td>'
-            f'<td><a href="{_escape(entry.get("url") or "", quote=True)}" '
-            'target="_blank" rel="noopener noreferrer">'
-            f'{_escape(entry.get("title") or "")}</a></td>'
-            f'<td class="num">{entry.get("appearances", 0)}</td>'
-            f'<td class="num">{entry.get("best_rank", "")}</td>'
-            f'<td class="num">{score:.2f}</td>'
-            f'<td>{_status_tag(str(entry.get("status") or ""))}</td>'
-            f'<td>{_sparkline(entry.get("rank_history") or [])}</td>'
-            "</tr>"
-        )
+def _analysis_body(analysis: dict) -> str:
+    points = "".join(
+        f"<li>{_escape(point)}</li>"
+        for point in analysis.get("key_points") or []
+    )
+    points_html = f"<ul>{points}</ul>" if points else ""
+    controversy = analysis.get("controversy")
+    controversy_html = (
+        f'<p class="meta">争议：{_escape(controversy)}</p>' if controversy else ""
+    )
+    topics = analysis.get("topics") or []
+    topics_html = (
+        f'<p class="meta">议题：{_escape(" / ".join(str(t) for t in topics))}</p>'
+        if topics
+        else ""
+    )
+    why = analysis.get("why_hot")
+    why_html = f'<p class="meta">上榜原因：{_escape(why)}</p>' if why else ""
     return (
-        "<table><thead><tr><th class=\"num\">#</th><th>标题</th>"
-        "<th class=\"num\">上榜</th><th class=\"num\">最好</th>"
-        "<th class=\"num\">分数</th><th>状态</th><th>走势</th></tr></thead>"
-        f'<tbody>{"".join(rows)}</tbody></table>'
+        f'<p>{_escape(analysis.get("summary") or "")}</p>'
+        f"{points_html}{controversy_html}{topics_html}{why_html}"
     )
 
 
-def _render_analyses(items: list[dict]) -> str:
-    cards = []
-    for entry in items:
-        analysis = entry.get("analysis")
-        if not isinstance(analysis, dict):
-            continue
-        points = "".join(
-            f"<li>{_escape(point)}</li>"
-            for point in analysis.get("key_points") or []
-        )
-        points_html = f"<ul>{points}</ul>" if points else ""
-        controversy = analysis.get("controversy")
-        controversy_html = (
-            f'<p class="meta">争议：{_escape(controversy)}</p>' if controversy else ""
-        )
-        topics = analysis.get("topics") or []
-        topics_html = (
-            f'<p class="meta">议题：{_escape(" / ".join(str(t) for t in topics))}</p>'
-            if topics
-            else ""
-        )
-        why = analysis.get("why_hot")
-        why_html = f'<p class="meta">上榜原因：{_escape(why)}</p>' if why else ""
-        cards.append(
-            '<article class="analysis">'
-            f'<div>{_status_tag(str(entry.get("status") or ""))}'
-            f'<a class="title" href="{_escape(entry.get("url") or "", quote=True)}" '
-            'target="_blank" rel="noopener noreferrer">'
-            f'{_escape(entry.get("title") or "")}</a></div>'
-            f'<p>{_escape(analysis.get("summary") or "")}</p>'
-            f"{points_html}{controversy_html}{topics_html}{why_html}"
-            "</article>"
-        )
-    return "".join(cards) if cards else '<p class="empty">无</p>'
+def _movement_tags(entry: dict) -> str:
+    status = str(entry.get("status") or "")
+    tags = []
+    if status in ("new", "continuing"):
+        tags.append(_status_tag(status))
+    if status == "continuing":
+        prev_score = entry.get("prev_score")
+        if prev_score is not None:
+            delta = float(entry.get("score") or 0) - float(prev_score)
+            if delta > 0:
+                tags.append(f'<span class="tag up">上升 {delta:+.2f}</span>')
+            elif delta < 0:
+                tags.append(f'<span class="tag down">下降 {delta:+.2f}</span>')
+            else:
+                tags.append('<span class="tag flat">持平</span>')
+        prev_best = entry.get("prev_best_rank")
+        if prev_best is not None:
+            rank_delta = int(prev_best) - int(entry.get("best_rank") or 0)
+            if rank_delta != 0:
+                tags.append(f'<span class="tag rank">名次 {rank_delta:+d}</span>')
+    return " ".join(tags)
 
 
-def _render_movers(items: list[dict]) -> str:
-    if not items:
-        return '<p class="empty">无</p>'
+def _render_top_list(items: list[dict]) -> str:
     rows = []
-    for entry in items:
-        score_delta = float(entry.get("score_delta") or 0)
-        rank_delta = int(entry.get("rank_delta") or 0)
+    for index, entry in enumerate(items, start=1):
+        analysis = entry.get("analysis")
+        title = _escape(entry.get("title") or "")
+        url = _escape(entry.get("url") or "", quote=True)
         meta = (
-            f'分数 {float(entry.get("prev_score") or 0):.2f} → '
-            f'{float(entry.get("score") or 0):.2f} ({score_delta:+.2f}) · '
-            f'最好名次 {entry.get("prev_best_rank", "?")} → '
-            f'{entry.get("best_rank", "?")} ({rank_delta:+d})'
+            f'上榜 {entry.get("appearances", 0)} 次 · '
+            f'最好第 {entry.get("best_rank", "?")} 名 · '
+            f'分数 {float(entry.get("score") or 0):.2f}'
         )
+        extra = (
+            f"<span>{_escape(meta)}</span>"
+            f"{_movement_tags(entry)}"
+            f'{_sparkline(entry.get("rank_history") or [])}'
+        )
+
+        if isinstance(analysis, dict):
+            url_text = _escape(entry.get("url") or "")
+            link_line = (
+                f'<p class="q-link"><a href="{url}" target="_blank" '
+                f'rel="noopener noreferrer">{url_text}</a></p>'
+            )
+            body = (
+                '<details class="top-details">'
+                '<summary class="top-summary">'
+                f'<span class="top-title">{title}</span>'
+                f'<span class="top-meta">{extra}</span>'
+                "</summary>"
+                f'<div class="q-analysis">{link_line}{_analysis_body(analysis)}</div>'
+                "</details>"
+            )
+        else:
+            body = (
+                f'<a class="top-title" href="{url}" target="_blank" '
+                f'rel="noopener noreferrer">{title}</a>'
+                f'<div class="top-meta">{extra}</div>'
+            )
+
         rows.append(
-            "<li>"
-            f'<a href="{_escape(entry.get("url") or "", quote=True)}" '
-            'target="_blank" rel="noopener noreferrer">'
-            f'{_escape(entry.get("title") or "")}</a>'
-            f'<p class="meta">{_escape(meta)}</p>'
+            '<li class="top-item">'
+            f'<span class="rank">{index}</span>'
+            f'<div class="top-body">{body}</div>'
             "</li>"
         )
-    return f'<ul class="topic-list">{"".join(rows)}</ul>'
+    return f'<ol class="top-list">{"".join(rows)}</ol>'
 
 
 def _render_day_over_day(report: dict) -> str:
@@ -355,12 +425,36 @@ def _render_day_over_day(report: dict) -> str:
         '<section><h2>较昨日变化</h2>\n'
         f"<p>{_escape(summary)}</p>\n"
         + (f'<p class="meta">{_escape(meta)}</p>\n' if meta else "")
-        + "<h3>上升</h3>"
-        + _render_movers(dod.get("risers") or [])
-        + "<h3>下降</h3>"
-        + _render_movers(dod.get("fallers") or [])
-        + "\n</section>\n"
+        + "</section>\n"
     )
+
+
+def _theme_questions(
+    question_ids: list[str], by_id: dict[str, dict]
+) -> str:
+    rows = []
+    for qid in question_ids or []:
+        item = by_id.get(qid)
+        if item is None:
+            continue
+        title = _escape(item.get("title") or qid)
+        url = _escape(item.get("url") or "", quote=True)
+        analysis = item.get("analysis")
+        marker = (
+            '<span class="q-marker">🔥</span>'
+            if isinstance(analysis, dict)
+            else '<span class="q-marker empty"></span>'
+        )
+        link = (
+            f'<a href="{url}" target="_blank" rel="noopener noreferrer">'
+            f"{title}</a>"
+        )
+        rows.append(
+            '<li class="theme-question">'
+            f'{marker}<span class="q-box">{link}</span>'
+            "</li>"
+        )
+    return f'<ul class="question-links">{"".join(rows)}</ul>' if rows else ""
 
 
 def _render_day(day: str, platform: str, report: dict, top: dict) -> str:
@@ -368,7 +462,6 @@ def _render_day(day: str, platform: str, report: dict, top: dict) -> str:
     window = report.get("window") or {}
     name = _platform_name(platform)
     items = [entry for entry in top.get("items") or [] if isinstance(entry, dict)]
-    analyses = [entry for entry in items if isinstance(entry.get("analysis"), dict)]
 
     body = (
         "<header>\n"
@@ -384,36 +477,21 @@ def _render_day(day: str, platform: str, report: dict, top: dict) -> str:
         f'<section class="overall"><h2>今日概览</h2>'
         f'<p>{_escape(report.get("overview") or "")}</p></section>\n'
         f"{_render_day_over_day(report)}"
-        '<section><h2>新增热点</h2>'
-        f'{_topic_list(report.get("new_topics") or [])}</section>\n'
-        '<section><h2>持续热点</h2>'
-        f'{_topic_list(report.get("continuing_topics") or [], show_prev=True)}</section>\n'
-        '<section><h2>退榜热点</h2>'
-        f'{_topic_list(report.get("retired_topics") or [])}</section>\n'
-    )
-
-    body += (
-        '<section><h2>Top 30 逐题分析</h2>\n'
-        f"{_render_analyses(analyses)}\n"
-        "</section>\n"
     )
 
     themes = report.get("themes") or []
     if themes:
-        theme_rows = []
         links_by_id = {entry.get("id"): entry for entry in items}
+        theme_rows = []
         for theme in themes:
-            links = " ".join(
-                f'<a href="{_escape((links_by_id.get(qid) or {}).get("url") or "", quote=True)}">'
-                f'{_escape(str((links_by_id.get(qid) or {}).get("title") or qid)[:40])}</a>'
-                for qid in theme.get("question_ids") or []
-                if qid in links_by_id
+            questions = _theme_questions(
+                theme.get("question_ids") or [], links_by_id
             )
             theme_rows.append(
                 "<li>"
                 f'<strong>{_escape(theme.get("topic") or "")}</strong>'
                 f'<p>{_escape(theme.get("summary") or "")}</p>'
-                f'<p class="meta">{links}</p>'
+                f"{questions}"
                 "</li>"
             )
         body += (
@@ -424,7 +502,10 @@ def _render_day(day: str, platform: str, report: dict, top: dict) -> str:
 
     body += (
         '<section><h2>Top 100</h2>\n'
-        f"{_render_table(items)}\n"
+        f"{_render_top_list(items)}\n"
+        "</section>\n"
+        '<section><h2>退榜热点</h2>\n'
+        f'{_topic_list(report.get("retired_topics") or [])}\n'
         "</section>"
     )
     return _page(f"{name}热点日报 · {day}", body, PAGE_PREFIX)
