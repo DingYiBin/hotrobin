@@ -52,10 +52,16 @@ QUESTION_SYSTEM = """你是中文热点分析助手。输入是一个知乎热�
 输出 JSON：
 {"summary":"2-4句话概括讨论内容","key_points":["3-5条代表性观点"],"controversy":"主要分歧，没有则为null","topics":["1-3个议题标签"],"why_hot":"一句话说明为什么上榜"}"""
 
-AGG_SYSTEM = """你是中文热点变化分析助手。输入是某个逻辑日的知乎热榜统计、新增/持续/退榜题目、Top30 逐题分析，以及昨日报告（如果有）。
+AGG_SYSTEM = """你是中文热点结构分析助手。输入是某个逻辑日的知乎热榜统计、题目变化、Top30 逐题分析，以及昨日报告（如果有）。
 只依据输入，不要编造。
+请重点关注“热点切换”和“关注领域的变化”，避免逐题流水账：
+- 不要罗列“某题上升/下降几名”“某题新上榜/退榜”这类低信息密度内容；除非能说明领域或议题结构变化，否则不要单独点名题目。
+- 用“注意力从 A 领域转向 B 领域”“某类议题占比上升/下降”“讨论焦点由 X 转为 Y”这类高层概括。
+- overview：4-5 句话（约 200-260 字），占主要篇幅，概括当天热榜由哪些领域构成、讨论重心落在哪里、讨论结构有什么特点；不要逐题罗列，也不要写单题名次升降。
+- day_over_day：2-3 句话（约 80-120 字），只写相较昨日最显著的 1-3 个领域或议题迁移；用“较昨日……”开头，不要复述 overview 已经说过的内容，不要写单题排名或退榜；没有昨日数据时用一句话说明无法判断变化方向。
+- themes：按上位领域或议题聚类，topic 用领域名而不是单个问题标题；summary 说明该领域今天为何受关注、讨论重心是什么、相对昨日升温还是降温；question_ids 只能使用输入中出现过的 id。
 输出 JSON：
-{"overview":"3-5句话总结当天热点变化","day_over_day":"3-5句话总结相较昨日的变化（新话题、退榜、排名升降、议题变化）；没有昨日数据时说明无法对比","themes":[{"topic":"议题名","summary":"概述","question_ids":["只能使用输入中出现过的 id"]}]}"""
+{"overview":"...","day_over_day":"...","themes":[{"topic":"领域或议题名","summary":"...","question_ids":["只能使用输入中出现过的 id"]}]}"""
 
 
 def day_window(day: str, day_start_hour: int) -> tuple[str, str]:
@@ -302,6 +308,9 @@ def _compact(entry: dict[str, Any]) -> dict[str, Any]:
         "prev_score",
         "prev_best_rank",
         "prev_appearances",
+        "board_rank",
+        "prev_board_rank",
+        "board_rank_delta",
         "analysis",
     )
     return {key: entry[key] for key in keys if key in entry}
@@ -404,7 +413,7 @@ def _fetch_page(
         except ZhihuAPIError as exc:
             if exc.code != 30001:
                 raise
-            label, remaining = classify_30001()
+            _, remaining = classify_30001()
             if remaining is not None and remaining > 0 and attempts < 1:
                 attempts += 1
                 print(
@@ -907,6 +916,20 @@ def run_daily_summary(
             data_dir, platform, day
         )
         top, retired_all = build_top(items, previous)
+        previous_board = {
+            str(item.get("id")): board_rank
+            for board_rank, item in enumerate(
+                (previous_top or {}).get("items") or [], start=1
+            )
+            if isinstance(item, dict)
+        }
+        for board_rank, entry in enumerate(top, start=1):
+            entry["board_rank"] = board_rank
+            prev_rank = previous_board.get(str(entry["id"]))
+            if prev_rank is not None:
+                entry["prev_board_rank"] = prev_rank
+                entry["board_rank_delta"] = prev_rank - board_rank
+
         new_items = [entry for entry in top if entry["status"] == "new"]
         continuing = [entry for entry in top if entry["status"] == "continuing"]
         retired = retired_all[:20]

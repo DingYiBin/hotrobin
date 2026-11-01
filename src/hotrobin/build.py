@@ -64,6 +64,8 @@ h3 { font-size: 1rem; margin: 1rem 0 0.4rem; }
 header { margin-bottom: 1.5rem; }
 .back { font-size: 0.9rem; }
 .meta { color: var(--muted); font-size: 0.85rem; margin: 0.25rem 0; }
+.summary-change { margin-top: 0.6rem; }
+.summary-change strong { color: var(--muted); font-weight: 600; }
 .empty { color: var(--muted); }
 section { margin-top: 2rem; }
 .snapshots, .topic-list { list-style: none; padding: 0; margin: 0; }
@@ -275,10 +277,10 @@ def _topic_list(items: list[dict], *, show_prev: bool = False) -> str:
         score = float(entry.get("score") or 0)
         meta = (
             f'上榜 {entry.get("appearances", 0)} 次 · '
-            f'最好第 {entry.get("best_rank", "?")} 名 · 分数 {score:.2f}'
+            f'热榜最好第 {entry.get("best_rank", "?")} 名 · 分数 {score:.2f}'
         )
         if show_prev and entry.get("prev_best_rank") is not None:
-            meta += f' · 昨日最好第 {entry.get("prev_best_rank")} 名'
+            meta += f' · 昨日热榜最好第 {entry.get("prev_best_rank")} 名'
         rows.append(
             "<li>"
             f'<a href="{_escape(entry.get("url") or "", quote=True)}" '
@@ -347,16 +349,19 @@ def _movement_tags(entry: dict) -> str:
         if prev_score is not None:
             delta = float(entry.get("score") or 0) - float(prev_score)
             if delta > 0:
-                tags.append(f'<span class="tag up">上升 {delta:+.2f}</span>')
+                tags.append(f'<span class="tag up">热度上升 {delta:+.2f}</span>')
             elif delta < 0:
-                tags.append(f'<span class="tag down">下降 {delta:+.2f}</span>')
+                tags.append(f'<span class="tag down">热度下降 {delta:+.2f}</span>')
             else:
-                tags.append('<span class="tag flat">持平</span>')
-        prev_best = entry.get("prev_best_rank")
-        if prev_best is not None:
-            rank_delta = int(prev_best) - int(entry.get("best_rank") or 0)
-            if rank_delta != 0:
-                tags.append(f'<span class="tag rank">名次 {rank_delta:+d}</span>')
+                tags.append('<span class="tag flat">热度持平</span>')
+        prev_board = entry.get("prev_board_rank")
+        board_rank = entry.get("board_rank")
+        if prev_board is not None and board_rank is not None:
+            rank_delta = int(prev_board) - int(board_rank)
+            label = "持平" if rank_delta == 0 else f"{rank_delta:+d}"
+            tags.append(f'<span class="tag rank">名次 {label}</span>')
+        elif status == "continuing":
+            tags.append('<span class="tag rank">新进 Top100</span>')
     return " ".join(tags)
 
 
@@ -368,7 +373,7 @@ def _render_top_list(items: list[dict]) -> str:
         url = _escape(entry.get("url") or "", quote=True)
         meta = (
             f'上榜 {entry.get("appearances", 0)} 次 · '
-            f'最好第 {entry.get("best_rank", "?")} 名 · '
+            f'热榜最好第 {entry.get("best_rank", "?")} 名 · '
             f'分数 {float(entry.get("score") or 0):.2f}'
         )
         extra = (
@@ -408,24 +413,24 @@ def _render_top_list(items: list[dict]) -> str:
     return f'<ol class="top-list">{"".join(rows)}</ol>'
 
 
-def _render_day_over_day(report: dict) -> str:
+def _render_summary(report: dict) -> str:
+    overview = str(report.get("overview") or "")
     dod = report.get("day_over_day") or {}
-    if not isinstance(dod, dict):
-        return ""
+    summary = str(dod.get("summary") or "") if isinstance(dod, dict) else ""
 
-    summary = str(dod.get("summary") or "")
-    meta_bits = []
-    if dod.get("previous_date"):
-        meta_bits.append(f"对比 {dod.get('previous_date')}")
-    if dod.get("unique_delta") is not None:
-        meta_bits.append(f"唯一题目较昨日 {int(dod.get('unique_delta')):+d}")
-    meta = " · ".join(meta_bits)
+    change = ""
+    if summary:
+        clean = re.sub(r"^较昨日[，,：:\s]*", "", summary)
+        change = (
+            '<p class="summary-change"><strong>较昨日：</strong>'
+            f"{_escape(clean)}</p>\n"
+        )
 
     return (
-        '<section><h2>较昨日变化</h2>\n'
-        f"<p>{_escape(summary)}</p>\n"
-        + (f'<p class="meta">{_escape(meta)}</p>\n' if meta else "")
-        + "</section>\n"
+        '<section class="overall"><h2>今日概览</h2>\n'
+        f"<p>{_escape(overview)}</p>\n"
+        f"{change}"
+        "</section>\n"
     )
 
 
@@ -474,9 +479,7 @@ def _render_day(day: str, platform: str, report: dict, top: dict) -> str:
         f'分析 {coverage.get("analyzed_questions", 0)} 题 · '
         f'回答摘要 {coverage.get("answers_analyzed", 0)} 条</p>\n'
         "</header>\n"
-        f'<section class="overall"><h2>今日概览</h2>'
-        f'<p>{_escape(report.get("overview") or "")}</p></section>\n'
-        f"{_render_day_over_day(report)}"
+        f"{_render_summary(report)}"
     )
 
     themes = report.get("themes") or []
