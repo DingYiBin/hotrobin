@@ -37,7 +37,9 @@ from .official import (
 )
 
 TOP_LIMIT = 100
-ANALYZE_LIMIT = 30
+HEAT_SCORE_THRESHOLD = 1.0
+MIN_ANALYZE = 30
+MAX_ANALYZE = 50
 DEEP_PAGES_LIMIT = 10
 PAGE_LIMIT = DEFAULT_ANSWER_LIMIT
 REQUEST_DELAY = 1.0
@@ -46,6 +48,7 @@ DEFERRED_RETRY_DELAY = 3.0
 RATE_LIMIT_COOLDOWN = 60.0
 FATAL_CODES = {20001, 30002, 30003}
 SUMMARY_CHAR_LIMIT = 300
+QUESTION_PROMPT_VERSION = 1
 
 QUESTION_SYSTEM = """你是中文热点分析助手。输入是一个知乎热榜问题、当日榜单指标和高赞回答摘要。
 只依据给定材料分析，不要补充外部事实，不要编造数据；材料不足时在 summary 中说明。
@@ -291,6 +294,17 @@ def build_top(
         )
     )
     return top, retired
+
+
+def select_analyze_items(top: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Pick high-heat questions: score >= 1.0, clamped to 30-50."""
+    high_heat = sum(
+        1
+        for entry in top
+        if float(entry.get("score") or 0) >= HEAT_SCORE_THRESHOLD
+    )
+    count = min(MAX_ANALYZE, max(MIN_ANALYZE, high_heat))
+    return top[:count]
 
 
 def _compact(entry: dict[str, Any]) -> dict[str, Any]:
@@ -723,6 +737,54 @@ def _normalize_analysis(data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _analysis_cache_path(day_dir: Path, question_id: str) -> Path:
+    return day_dir / "analyses" / f"{question_id}.json"
+
+
+def _load_cached_analysis(
+    day_dir: Path, question_id: str
+) -> dict[str, Any] | None:
+    path = _analysis_cache_path(day_dir, question_id)
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    if data.get("prompt_version") != QUESTION_PROMPT_VERSION:
+        return None
+    if data.get("model") != model_name():
+        return None
+    analysis = data.get("analysis")
+    return analysis if isinstance(analysis, dict) else None
+
+
+def _save_cached_analysis(
+    day_dir: Path,
+    item: dict[str, Any],
+    analysis: dict[str, Any],
+    usage: dict[str, Any],
+) -> None:
+    path = _analysis_cache_path(day_dir, item["id"])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "id": item["id"],
+        "model": model_name(),
+        "prompt_version": QUESTION_PROMPT_VERSION,
+        "generated_at": datetime.now(SHANGHAI_TZ).isoformat(timespec="seconds"),
+        "analysis": analysis,
+        "usage": usage,
+    }
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    temporary.replace(path)
+
+
 def analyze_questions(
     day_dir: Path, analyze_items: list[dict[str, Any]]
 ) -> list[dict[str, Any]]:
@@ -730,6 +792,12 @@ def analyze_questions(
     total = len(analyze_items)
     for index, item in enumerate(analyze_items, start=1):
         print(f"    逐题分析 {index}/{total}: {item['id']}")
+        cached = _load_cached_analysis(day_dir, item["id"])
+        if cached is not None:
+            item["analysis"] = cached
+            print("      命中缓存，跳过模型调用")
+            continue
+
         answers = _load_answers(day_dir, item["id"])
         summaries = (
             [answer.summary[:SUMMARY_CHAR_LIMIT] for answer in answers.answers]
@@ -758,7 +826,9 @@ def analyze_questions(
                 {"question_id": item["id"]},
             )
             raise
-        item["analysis"] = _normalize_analysis(response.data)
+        analysis = _normalize_analysis(response.data)
+        item["analysis"] = analysis
+        _save_cached_analysis(day_dir, item, analysis, response.usage)
         usages.append(dict(response.usage, purpose=f"question {item['id']}"))
     return usages
 
@@ -945,7 +1015,7 @@ def run_daily_summary(
         )
 
         step = "answers"
-        analyze_items = _apply_quota(day_dir, top[:ANALYZE_LIMIT])
+        analyze_items = _apply_quota(day_dir, select_analyze_items(top))
         print(f"  回答抓取：{len(analyze_items)} 题")
         answers_count = collect_day_answers(day_dir, analyze_items)
         print(f"  回答摘要：{answers_count} 条")

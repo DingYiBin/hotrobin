@@ -371,10 +371,13 @@ def _render_top_list(items: list[dict]) -> str:
         analysis = entry.get("analysis")
         title = _escape(entry.get("title") or "")
         url = _escape(entry.get("url") or "", quote=True)
+        score_text = f'分数 {float(entry.get("score") or 0):.2f}'
+        if isinstance(analysis, dict):
+            score_text += " \U0001f525"
         meta = (
             f'上榜 {entry.get("appearances", 0)} 次 · '
             f'热榜最好第 {entry.get("best_rank", "?")} 名 · '
-            f'分数 {float(entry.get("score") or 0):.2f}'
+            f'{score_text}'
         )
         extra = (
             f"<span>{_escape(meta)}</span>"
