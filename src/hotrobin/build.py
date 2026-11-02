@@ -6,7 +6,7 @@ import html
 import json
 import re
 import shutil
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -269,29 +269,6 @@ def _status_tag(status: str) -> str:
     return f'<span class="tag {_escape(status, quote=True)}">{_escape(label)}</span>'
 
 
-def _topic_list(items: list[dict], *, show_prev: bool = False) -> str:
-    if not items:
-        return '<p class="empty">无</p>'
-    rows = []
-    for entry in items:
-        score = float(entry.get("score") or 0)
-        meta = (
-            f'上榜 {entry.get("appearances", 0)} 次 · '
-            f'热榜最好第 {entry.get("best_rank", "?")} 名 · 分数 {score:.2f}'
-        )
-        if show_prev and entry.get("prev_best_rank") is not None:
-            meta += f' · 昨日热榜最好第 {entry.get("prev_best_rank")} 名'
-        rows.append(
-            "<li>"
-            f'<a href="{_escape(entry.get("url") or "", quote=True)}" '
-            'target="_blank" rel="noopener noreferrer">'
-            f'{_escape(entry.get("title") or "")}</a>'
-            f'<p class="meta">{_escape(meta)}</p>'
-            "</li>"
-        )
-    return f'<ul class="topic-list">{"".join(rows)}</ul>'
-
-
 def _sparkline(history: list[dict]) -> str:
     points = [
         item for item in history if isinstance(item, dict) and item.get("rank") is not None
@@ -416,6 +393,31 @@ def _render_top_list(items: list[dict]) -> str:
     return f'<ol class="top-list">{"".join(rows)}</ol>'
 
 
+def _previous_date(report: dict, dod: dict) -> str | None:
+    previous = dod.get("previous_date") if isinstance(dod, dict) else None
+    if previous:
+        return str(previous)
+    day = str(report.get("date") or "")
+    try:
+        return (date.fromisoformat(day) - timedelta(days=1)).isoformat()
+    except ValueError:
+        return None
+
+
+def _strip_change_prefix(text: str) -> str:
+    patterns = (
+        r"^较\s*前一逻辑日[，,：:\s]*",
+        r"^较\s*前一日[，,：:\s]*",
+        r"^较\s*昨日[，,：:\s]*",
+        r"^较\s*\d{4}-\d{2}-\d{2}[，,：:\s]*",
+        r"^较\s*\d{4}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日[，,：:\s]*",
+        r"^较\s*\d{1,2}\s*月\s*\d{1,2}\s*日[，,：:\s]*",
+    )
+    for pattern in patterns:
+        text = re.sub(pattern, "", text).strip()
+    return text
+
+
 def _render_summary(report: dict) -> str:
     overview = str(report.get("overview") or "")
     dod = report.get("day_over_day") or {}
@@ -423,14 +425,16 @@ def _render_summary(report: dict) -> str:
 
     change = ""
     if summary:
-        clean = re.sub(r"^较昨日[，,：:\s]*", "", summary)
+        clean = _strip_change_prefix(summary)
+        previous = _previous_date(report, dod)
+        label = f"较 {previous}：" if previous else "较前一日："
         change = (
-            '<p class="summary-change"><strong>较昨日：</strong>'
+            f'<p class="summary-change"><strong>{_escape(label)}</strong>'
             f"{_escape(clean)}</p>\n"
         )
 
     return (
-        '<section class="overall"><h2>今日概览</h2>\n'
+        '<section class="overall"><h2>概览</h2>\n'
         f"<p>{_escape(overview)}</p>\n"
         f"{change}"
         "</section>\n"
@@ -509,9 +513,6 @@ def _render_day(day: str, platform: str, report: dict, top: dict) -> str:
     body += (
         '<section><h2>Top 100</h2>\n'
         f"{_render_top_list(items)}\n"
-        "</section>\n"
-        '<section><h2>退榜热点</h2>\n'
-        f'{_topic_list(report.get("retired_topics") or [])}\n'
         "</section>"
     )
     return _page(f"{name}热点日报 · {day}", body, PAGE_PREFIX)
@@ -542,13 +543,20 @@ def _render_index(
     rows = []
     for day, platform, report, top in days:
         coverage = report.get("coverage") or {}
+        counts = report.get("counts") or {}
+        new_count = counts.get("new")
+        if new_count is None:
+            new_count = len(report.get("new_topics") or [])
+        retired_count = counts.get("retired")
+        if retired_count is None:
+            retired_count = len(report.get("retired_topics") or [])
         link = f"{_slug(platform)}/{day[:4]}/{day[5:7]}/{day}.html"
         rows.append(
             f'<li><span class="date">{_escape(day)}</span>'
             f'<a href="{_escape(link, quote=True)}">{_escape(_platform_name(platform))}日报</a>'
             f'<span class="count">{coverage.get("unique_questions", 0)} 题 · '
-            f'新增 {len(report.get("new_topics") or [])} · '
-            f'退榜 {len(report.get("retired_topics") or [])}</span></li>'
+            f'新增 {new_count} · '
+            f'退榜 {retired_count}</span></li>'
         )
     body = (
         f"<h1>{title}</h1>\n"

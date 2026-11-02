@@ -55,14 +55,14 @@ QUESTION_SYSTEM = """你是中文热点分析助手。输入是一个知乎热�
 输出 JSON：
 {"summary":"2-4句话概括讨论内容","key_points":["3-5条代表性观点"],"controversy":"主要分歧，没有则为null","topics":["1-3个议题标签"],"why_hot":"一句话说明为什么上榜"}"""
 
-AGG_SYSTEM = """你是中文热点结构分析助手。输入是某个逻辑日的知乎热榜统计、题目变化、Top30 逐题分析，以及昨日报告（如果有）。
-只依据输入，不要编造。
+AGG_SYSTEM = """你是中文热点结构分析助手。输入是某个逻辑日（date）的知乎热榜统计、前一逻辑日（previous_day.date）的退榜题目、高热题逐题分析，以及前一逻辑日报告（如果有）。
+只依据输入，不要编造。指代日期时使用输入中的具体日期，不要使用“今日/昨日/今天/昨天/当天/当日/本日”等相对表述。
 请重点关注“热点切换”和“关注领域的变化”，避免逐题流水账：
 - 不要罗列“某题上升/下降几名”“某题新上榜/退榜”这类低信息密度内容；除非能说明领域或议题结构变化，否则不要单独点名题目。
 - 用“注意力从 A 领域转向 B 领域”“某类议题占比上升/下降”“讨论焦点由 X 转为 Y”这类高层概括。
-- overview：4-5 句话（约 200-260 字），占主要篇幅，概括当天热榜由哪些领域构成、讨论重心落在哪里、讨论结构有什么特点；不要逐题罗列，也不要写单题名次升降。
-- day_over_day：2-3 句话（约 80-120 字），只写相较昨日最显著的 1-3 个领域或议题迁移；用“较昨日……”开头，不要复述 overview 已经说过的内容，不要写单题排名或退榜；没有昨日数据时用一句话说明无法判断变化方向。
-- themes：按上位领域或议题聚类，topic 用领域名而不是单个问题标题；summary 说明该领域今天为何受关注、讨论重心是什么、相对昨日升温还是降温；question_ids 只能使用输入中出现过的 id。
+- overview：4-5 句话（约 200-260 字），占主要篇幅，概括该日期热榜由哪些领域构成、讨论重心落在哪里、讨论结构有什么特点；不要逐题罗列，也不要写单题名次升降。
+- day_over_day：2-3 句话（约 80-120 字），只写相较前一逻辑日最显著的 1-3 个领域或议题迁移；用“较 <前一逻辑日的具体日期>……”开头，不要复述 overview 已经说过的内容，不要写单题排名或退榜；没有前一逻辑日数据时用一句话说明无法判断变化方向。
+- themes：按上位领域或议题聚类，topic 用领域名而不是单个问题标题；summary 说明该领域在该日期为何受关注、讨论重心是什么、相对前一逻辑日升温还是降温；question_ids 只能使用输入中出现过的 id。
 输出 JSON：
 {"overview":"...","day_over_day":"...","themes":[{"topic":"领域或议题名","summary":"...","question_ids":["只能使用输入中出现过的 id"]}]}"""
 
@@ -487,10 +487,33 @@ def _handle_api_error(
     return False
 
 
+def _answer_pages_needed(
+    day_dir: Path, item: dict[str, Any], index: int
+) -> int:
+    """Quota cost for one question, accounting for already-collected answers."""
+    planned_pages = 2 if index < DEEP_PAGES_LIMIT else 1
+    existing = _load_answers(day_dir, item["id"])
+    if existing is None:
+        return planned_pages
+    if existing.is_end or existing.pages >= planned_pages:
+        return 0
+    if index < DEEP_PAGES_LIMIT and existing.next_offset is not None:
+        return 1
+    return 0
+
+
 def _apply_quota(
     day_dir: Path, analyze_items: list[dict[str, Any]]
 ) -> list[dict[str, Any]]:
     if not analyze_items:
+        return analyze_items
+
+    costs = [
+        _answer_pages_needed(day_dir, item, index)
+        for index, item in enumerate(analyze_items)
+    ]
+    needed = sum(costs)
+    if needed == 0:
         return analyze_items
 
     remaining = remaining_quota("question_discovery")
@@ -506,15 +529,12 @@ def _apply_quota(
         )
         print(f"  {message}")
         return []
-
-    needed = sum(2 if index < DEEP_PAGES_LIMIT else 1 for index in range(len(analyze_items)))
     if remaining >= needed:
         return analyze_items
 
     budget = remaining
     selected: list[dict[str, Any]] = []
-    for index, item in enumerate(analyze_items):
-        cost = 2 if index < DEEP_PAGES_LIMIT else 1
+    for item, cost in zip(analyze_items, costs):
         if budget < cost:
             break
         selected.append(item)
@@ -839,9 +859,7 @@ def aggregate_analysis(
     *,
     counts: dict[str, int],
     top: list[dict[str, Any]],
-    new_items: list[dict[str, Any]],
-    continuing: list[dict[str, Any]],
-    retired: list[dict[str, Any]],
+    retired_all: list[dict[str, Any]],
     analyze_items: list[dict[str, Any]],
     previous_report: dict | None,
     previous_top: dict | None,
@@ -869,9 +887,15 @@ def aggregate_analysis(
     payload = {
         "date": day,
         "counts": counts,
-        "new_topics": [_compact(item) for item in new_items[:20]],
-        "continuing_topics": [_compact(item) for item in continuing[:20]],
-        "retired_topics": [_compact(item) for item in retired],
+        "retired_previous_day": [
+            {
+                "id": item.get("id"),
+                "title": item.get("title"),
+                "score": round(float(item.get("score") or 0), 3),
+                "best_rank": item.get("best_rank"),
+            }
+            for item in retired_all
+        ],
         "analyses": [
             {"id": item["id"], "title": item["title"], "analysis": item.get("analysis")}
             for item in analyze_items
@@ -1002,7 +1026,7 @@ def run_daily_summary(
 
         new_items = [entry for entry in top if entry["status"] == "new"]
         continuing = [entry for entry in top if entry["status"] == "continuing"]
-        retired = retired_all[:20]
+        retired_sample = retired_all[:20]
         counts = {
             "snapshots": len(snapshots),
             "unique_questions": len(items),
@@ -1031,9 +1055,7 @@ def run_daily_summary(
                 day,
                 counts=counts,
                 top=top,
-                new_items=new_items,
-                continuing=continuing,
-                retired=retired,
+                retired_all=retired_all,
                 analyze_items=analyze_items,
                 previous_report=previous_report,
                 previous_top=previous_top,
@@ -1045,7 +1067,7 @@ def run_daily_summary(
             dod_summary = (
                 "回答额度不足，未生成模型对比分析。"
                 if previous_report is not None
-                else "无昨日数据，无法对比。"
+                else "无前一逻辑日数据，无法对比。"
             )
             themes = []
 
@@ -1081,7 +1103,7 @@ def run_daily_summary(
             "day_over_day": {"summary": dod_summary, **dod_metrics},
             "new_topics": [_compact(entry) for entry in new_items[:20]],
             "continuing_topics": [_compact(entry) for entry in continuing[:20]],
-            "retired_topics": [_compact(entry) for entry in retired],
+            "retired_topics": [_compact(entry) for entry in retired_sample],
             "themes": themes,
             "usage": {"calls": usages, "totals": _usage_totals(usages)},
         }

@@ -21,9 +21,9 @@ from dataclasses import dataclass
 from typing import Any
 
 DEFAULT_BASE_URL = "https://api.deepseek.com"
-DEFAULT_MODEL = "deepseek-chat"
-DEFAULT_MAX_TOKENS = 8192
-REQUEST_TIMEOUT = 240
+DEFAULT_MODEL = "deepseek-flash"
+DEFAULT_MAX_TOKENS = 65536
+REQUEST_TIMEOUT = 1800
 
 
 @dataclass(frozen=True)

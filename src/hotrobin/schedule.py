@@ -5,6 +5,8 @@ Environment:
 - ``HOTROBIN_FETCH_MINUTES``: snapshot interval, default 30 minutes.
 - ``HOTROBIN_SUMMARY_AT``: daily summary time, default ``04:00``. This time
   also defines the logical day boundary.
+
+Summaries run in a background thread so interval snapshots keep running.
 """
 
 from __future__ import annotations
@@ -12,6 +14,7 @@ from __future__ import annotations
 import os
 import re
 import sys
+import threading
 import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -147,6 +150,42 @@ def _run_summary(
         print(f"日报生成失败（{day}）：{exc}")
 
 
+def _start_summary(
+    data_dir: Path,
+    out_dir: Path,
+    day: str,
+    day_start_hour: int,
+    *,
+    current: threading.Thread | None,
+    boundary_snapshot: Path | None = None,
+) -> threading.Thread | None:
+    """Run the summary in a background thread so snapshots keep flowing."""
+    previous = current
+
+    def run() -> None:
+        if previous is not None:
+            previous.join()
+        _run_summary(
+            data_dir,
+            out_dir,
+            day,
+            day_start_hour,
+            boundary_snapshot=boundary_snapshot,
+        )
+
+    thread = threading.Thread(
+        target=run,
+        name=f"summary-{day}",
+        daemon=True,
+    )
+    thread.start()
+    if previous is not None and previous.is_alive():
+        print(f"上一份日报仍在生成，{day} 日报排队等待（热榜抓取继续）")
+    else:
+        print(f"日报已在后台生成：{day}（热榜抓取继续）")
+    return thread
+
+
 def run_scheduler(data_dir: Path, out_dir: Path) -> None:
     sys.stdout.reconfigure(line_buffering=True)
 
@@ -171,12 +210,15 @@ def run_scheduler(data_dir: Path, out_dir: Path) -> None:
     if (24 * 60) // interval + 1 > 100:
         print("提示：当前间隔每天抓取超过 100 次，可能超出热榜免费额度。")
 
+    summary_thread: threading.Thread | None = None
     now = datetime.now(SHANGHAI_TZ)
     missed_day = last_ended_day(now, summary_hour)
     missed_dir = day_directory(data_dir, "zhihu", missed_day)
     if (missed_dir / "snapshots").is_dir() and not (missed_dir / "report.json").exists():
         print(f"补做漏掉的日报：{missed_day}")
-        _run_summary(data_dir, out_dir, missed_day, summary_hour)
+        summary_thread = _start_summary(
+            data_dir, out_dir, missed_day, summary_hour, current=summary_thread
+        )
 
     while True:
         now = datetime.now(SHANGHAI_TZ)
@@ -202,8 +244,13 @@ def run_scheduler(data_dir: Path, out_dir: Path) -> None:
             # as the closing point of the day being summarized.
             boundary = _run_snapshot(data_dir, summary_hour)
             day = last_ended_day(current, summary_hour)
-            _run_summary(
-                data_dir, out_dir, day, summary_hour, boundary_snapshot=boundary
+            summary_thread = _start_summary(
+                data_dir,
+                out_dir,
+                day,
+                summary_hour,
+                current=summary_thread,
+                boundary_snapshot=boundary,
             )
         else:
             _run_snapshot(data_dir, summary_hour)

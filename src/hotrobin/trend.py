@@ -277,7 +277,7 @@ def render_trend_body(days: list[tuple[str, str, dict, dict]]) -> str | None:
         '<a class="back" href="../index.html">← 全部日报</a>\n'
         "<h1>知乎热点趋势</h1>\n"
         f'<p class="meta">共 {len(points)} 个逻辑日 · '
-        "新增/持续按 Top 100 统计，退榜按昨日全部题目统计</p>\n"
+        "新增/持续按 Top 100 统计，退榜按前一逻辑日全部题目统计</p>\n"
         "</header>\n"
         f"{_legend()}\n"
         '<section><h2>每日新增 / 持续 / 退榜</h2>\n'
