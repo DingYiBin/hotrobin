@@ -6,11 +6,9 @@ import html
 import json
 import re
 import shutil
-from datetime import date, datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Any
-
-from .trend import render_trend_body
 
 PLATFORM_NAMES = {
     "zhihu": "知乎",
@@ -18,9 +16,6 @@ PLATFORM_NAMES = {
 }
 
 PAGE_PREFIX = "../../../"
-TREND_PREFIX = "../"
-STATUS_LABELS = {"new": "新增", "continuing": "持续", "retired": "退榜"}
-STATUS_ORDER = {"new": 0, "continuing": 1, "retired": 2}
 
 STYLE = """
 :root {
@@ -64,9 +59,9 @@ h3 { font-size: 1rem; margin: 1rem 0 0.4rem; }
 header { margin-bottom: 1.5rem; }
 .back { font-size: 0.9rem; }
 .meta { color: var(--muted); font-size: 0.85rem; margin: 0.25rem 0; }
+.empty { color: var(--muted); }
 .summary-change { margin-top: 0.6rem; }
 .summary-change strong { color: var(--muted); font-weight: 600; }
-.empty { color: var(--muted); }
 section { margin-top: 2rem; }
 .snapshots, .topic-list { list-style: none; padding: 0; margin: 0; }
 .snapshots li {
@@ -80,7 +75,6 @@ section { margin-top: 2rem; }
   border-radius: 10px;
 }
 .snapshots .date { font-variant-numeric: tabular-nums; font-weight: 600; }
-.snapshots .count { margin-left: auto; color: var(--muted); font-size: 0.85rem; }
 .topic-list > li {
   background: var(--card);
   border: 1px solid var(--border);
@@ -89,19 +83,15 @@ section { margin-top: 2rem; }
   margin-bottom: 0.6rem;
 }
 .topic-list a { font-weight: 600; }
-.trend-link { margin: 0 0 0.75rem; }
-.trend-link a { font-weight: 600; }
 .tag {
   display: inline-block;
   padding: 0.05rem 0.45rem;
   border-radius: 999px;
   font-size: 0.78rem;
   font-weight: 600;
-  margin-right: 0.4rem;
 }
 .tag.new { background: rgba(22, 163, 74, 0.14); color: var(--green); }
 .tag.continuing { background: rgba(37, 99, 235, 0.12); color: var(--blue); }
-.tag.retired { background: rgba(220, 38, 38, 0.12); color: var(--red); }
 .tag.up { background: rgba(22, 163, 74, 0.14); color: var(--green); }
 .tag.down { background: rgba(220, 38, 38, 0.12); color: var(--red); }
 .tag.flat { background: rgba(107, 114, 128, 0.18); color: var(--muted); }
@@ -135,7 +125,6 @@ section { margin-top: 2rem; }
   font-size: 0.85rem;
   margin-top: 0.2rem;
 }
-.top-meta .tag { margin-right: 0; }
 .top-details .q-analysis { margin-left: 0; }
 .question-links { list-style: none; margin: 0.3rem 0 0; padding-left: 0; font-size: 0.9rem; }
 .question-links li { margin: 0.25rem 0; }
@@ -185,8 +174,6 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
   border-radius: 2px;
   margin-right: 0.3rem;
 }
-.trend-chart { width: 100%; height: auto; color: var(--text); }
-.trend-chart text { fill: currentColor; }
 details summary { cursor: pointer; color: var(--accent); }
 code {
   background: var(--border);
@@ -264,11 +251,6 @@ def _load_days(data_dir: Path) -> list[tuple[str, str, dict, dict]]:
     return days
 
 
-def _status_tag(status: str) -> str:
-    label = STATUS_LABELS.get(status, status)
-    return f'<span class="tag {_escape(status, quote=True)}">{_escape(label)}</span>'
-
-
 def _sparkline(history: list[dict]) -> str:
     points = [
         item for item in history if isinstance(item, dict) and item.get("rank") is not None
@@ -319,9 +301,10 @@ def _analysis_body(analysis: dict) -> str:
 def _movement_tags(entry: dict) -> str:
     status = str(entry.get("status") or "")
     tags = []
-    if status in ("new", "continuing"):
-        tags.append(_status_tag(status))
-    if status == "continuing":
+    if status == "new":
+        tags.append('<span class="tag new">新增</span>')
+    elif status == "continuing":
+        tags.append('<span class="tag continuing">持续</span>')
         prev_score = entry.get("prev_score")
         if prev_score is not None:
             delta = float(entry.get("score") or 0) - float(prev_score)
@@ -337,8 +320,6 @@ def _movement_tags(entry: dict) -> str:
             rank_delta = int(prev_board) - int(board_rank)
             label = "持平" if rank_delta == 0 else f"{rank_delta:+d}"
             tags.append(f'<span class="tag rank">名次 {label}</span>')
-        elif status == "continuing":
-            tags.append('<span class="tag rank">新进 Top100</span>')
     return " ".join(tags)
 
 
@@ -393,15 +374,9 @@ def _render_top_list(items: list[dict]) -> str:
     return f'<ol class="top-list">{"".join(rows)}</ol>'
 
 
-def _previous_date(report: dict, dod: dict) -> str | None:
+def _previous_date(dod: dict) -> str | None:
     previous = dod.get("previous_date") if isinstance(dod, dict) else None
-    if previous:
-        return str(previous)
-    day = str(report.get("date") or "")
-    try:
-        return (date.fromisoformat(day) - timedelta(days=1)).isoformat()
-    except ValueError:
-        return None
+    return str(previous) if previous else None
 
 
 def _strip_change_prefix(text: str) -> str:
@@ -424,12 +399,11 @@ def _render_summary(report: dict) -> str:
     summary = str(dod.get("summary") or "") if isinstance(dod, dict) else ""
 
     change = ""
-    if summary:
+    previous = _previous_date(dod)
+    if previous and summary:
         clean = _strip_change_prefix(summary)
-        previous = _previous_date(report, dod)
-        label = f"较 {previous}：" if previous else "较前一日："
         change = (
-            f'<p class="summary-change"><strong>{_escape(label)}</strong>'
+            f'<p class="summary-change"><strong>较 {previous}：</strong>'
             f"{_escape(clean)}</p>\n"
         )
 
@@ -518,49 +492,27 @@ def _render_day(day: str, platform: str, report: dict, top: dict) -> str:
     return _page(f"{name}热点日报 · {day}", body, PAGE_PREFIX)
 
 
-def _render_index(
-    days: list[tuple[str, str, dict, dict]],
-    trend_links: dict[str, str],
-) -> str:
+def _render_index(days: list[tuple[str, str, dict, dict]]) -> str:
     title = "hotrobin 每日热点"
-    trend_html = ""
-    zhihu_trend = trend_links.get("zhihu")
-    if zhihu_trend:
-        trend_html = (
-            f'<p class="trend-link"><a href="{_escape(zhihu_trend, quote=True)}">'
-            "查看热点趋势 →</a></p>\n"
-        )
 
     if not days:
         body = (
             f"<h1>{title}</h1>\n"
-            f"{trend_html}"
             '<p class="empty">还没有日报。等调度器跑完一个逻辑日后，'
             "运行 <code>hotrobin build</code>。</p>"
         )
         return _page(title, body)
 
     rows = []
-    for day, platform, report, top in days:
-        coverage = report.get("coverage") or {}
-        counts = report.get("counts") or {}
-        new_count = counts.get("new")
-        if new_count is None:
-            new_count = len(report.get("new_topics") or [])
-        retired_count = counts.get("retired")
-        if retired_count is None:
-            retired_count = len(report.get("retired_topics") or [])
+    for day, platform, *_ in days:
         link = f"{_slug(platform)}/{day[:4]}/{day[5:7]}/{day}.html"
         rows.append(
             f'<li><span class="date">{_escape(day)}</span>'
-            f'<a href="{_escape(link, quote=True)}">{_escape(_platform_name(platform))}日报</a>'
-            f'<span class="count">{coverage.get("unique_questions", 0)} 题 · '
-            f'新增 {new_count} · '
-            f'退榜 {retired_count}</span></li>'
+            f'<a href="{_escape(link, quote=True)}">'
+            f"{_escape(_platform_name(platform))}热点日报</a></li>"
         )
     body = (
         f"<h1>{title}</h1>\n"
-        f"{trend_html}"
         f'<p class="meta">共 {len(days)} 份日报</p>\n'
         f'<ul class="snapshots">{"".join(rows)}</ul>'
     )
@@ -585,19 +537,6 @@ def build_site(data_dir: Path, out_dir: Path) -> int:
             _render_day(day, platform, report, top), encoding="utf-8"
         )
 
-    trend_links: dict[str, str] = {}
-    if days:
-        trend_body = render_trend_body(days)
-        if trend_body is not None:
-            trend_dir = out_dir / "zhihu"
-            trend_dir.mkdir(parents=True, exist_ok=True)
-            (trend_dir / "trend.html").write_text(
-                _page("知乎热点趋势", trend_body, TREND_PREFIX), encoding="utf-8"
-            )
-            trend_links["zhihu"] = "zhihu/trend.html"
-
     (out_dir / "style.css").write_text(STYLE, encoding="utf-8")
-    (out_dir / "index.html").write_text(
-        _render_index(days, trend_links), encoding="utf-8"
-    )
+    (out_dir / "index.html").write_text(_render_index(days), encoding="utf-8")
     return len(days)

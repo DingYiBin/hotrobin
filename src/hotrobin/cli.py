@@ -63,7 +63,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     sys.stdout.reconfigure(line_buffering=True)
     _load_dotenv()
     parser = argparse.ArgumentParser(
-        prog="hotrobin", description="每日热点抓取、变化总结与浏览"
+        prog="hotrobin", description="每日热点抓取、总结与浏览"
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -71,7 +71,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     fetch_parser.add_argument("--data-dir", type=Path, default=Path("data"))
 
     summary_parser = sub.add_parser(
-        "summary", help="生成某个逻辑日的热点变化日报"
+        "summary", help="生成某个逻辑日的热点日报"
     )
     summary_parser.add_argument("--data-dir", type=Path, default=Path("data"))
     summary_parser.add_argument("--out", type=Path, default=Path("site"))

@@ -1,8 +1,8 @@
-"""Daily hot-topic aggregation, answer collection, and change analysis.
+"""Daily hot-topic aggregation, answer collection, and structure analysis.
 
 A logical day starts at 04:00 Asia/Shanghai. Snapshots for the day live in
-``<day>/snapshots/``; the summary writes ``top.json``, ``seen.json``,
-``answers/``, and ``report.json`` in the same day directory.
+``<day>/snapshots/``; the summary writes ``top.json``, ``answers/``, and
+``report.json`` in the same day directory.
 """
 
 from __future__ import annotations
@@ -55,14 +55,14 @@ QUESTION_SYSTEM = """你是中文热点分析助手。输入是一个知乎热�
 输出 JSON：
 {"summary":"2-4句话概括讨论内容","key_points":["3-5条代表性观点"],"controversy":"主要分歧，没有则为null","topics":["1-3个议题标签"],"why_hot":"一句话说明为什么上榜"}"""
 
-AGG_SYSTEM = """你是中文热点结构分析助手。输入是某个逻辑日（date）的知乎热榜统计、前一逻辑日（previous_day.date）的退榜题目、高热题逐题分析，以及前一逻辑日报告（如果有）。
+AGG_SYSTEM = """你是中文热点结构分析助手。输入是某个逻辑日（date）的知乎热榜 Top 100、高热题逐题分析，以及前一逻辑日（previous_day.date）的概览和议题总结。
 只依据输入，不要编造。指代日期时使用输入中的具体日期，不要使用“今日/昨日/今天/昨天/当天/当日/本日”等相对表述。
-请重点关注“热点切换”和“关注领域的变化”，避免逐题流水账：
-- 不要罗列“某题上升/下降几名”“某题新上榜/退榜”这类低信息密度内容；除非能说明领域或议题结构变化，否则不要单独点名题目。
-- 用“注意力从 A 领域转向 B 领域”“某类议题占比上升/下降”“讨论焦点由 X 转为 Y”这类高层概括。
-- overview：4-5 句话（约 200-260 字），占主要篇幅，概括该日期热榜由哪些领域构成、讨论重心落在哪里、讨论结构有什么特点；不要逐题罗列，也不要写单题名次升降。
-- day_over_day：2-3 句话（约 80-120 字），只写相较前一逻辑日最显著的 1-3 个领域或议题迁移；用“较 <前一逻辑日的具体日期>……”开头，不要复述 overview 已经说过的内容，不要写单题排名或退榜；没有前一逻辑日数据时用一句话说明无法判断变化方向。
-- themes：按上位领域或议题聚类，topic 用领域名而不是单个问题标题；summary 说明该领域在该日期为何受关注、讨论重心是什么、相对前一逻辑日升温还是降温；question_ids 只能使用输入中出现过的 id。
+请重点关注“热点结构”和“关注领域”，避免逐题流水账：
+- 不要罗列单题名次升降或逐题清单；除非能说明领域或议题结构，否则不要单独点名题目。
+- 用“注意力集中在 A 领域”“某类议题占比最高”“讨论焦点落在 X”这类高层概括。
+- overview：4-5 句话（约 200-260 字），占主要篇幅，概括该日期热榜由哪些领域构成、讨论重心落在哪里、讨论结构有什么特点；不要逐题罗列。
+- day_over_day：2-3 句话（约 80-120 字），只写相较前一逻辑日最显著的 1-3 个领域或议题迁移；用“较 <previous_day.date>……”开头；不要复述 overview，不要写单题排名、新增或退榜；没有 previous_day 时用一句话说明无法判断变化方向。
+- themes：按上位领域或议题聚类，topic 用领域名而不是单个问题标题；summary 说明该领域在该日期为何受关注、讨论重心是什么；question_ids 只能使用输入中出现过的 id。
 输出 JSON：
 {"overview":"...","day_over_day":"...","themes":[{"topic":"领域或议题名","summary":"...","question_ids":["只能使用输入中出现过的 id"]}]}"""
 
@@ -75,10 +75,6 @@ def day_window(day: str, day_start_hour: int) -> tuple[str, str]:
     return start.isoformat(timespec="seconds"), end.isoformat(timespec="seconds")
 
 
-def previous_day(day: str) -> str:
-    return (date.fromisoformat(day) - timedelta(days=1)).isoformat()
-
-
 def load_day_snapshots(day_dir: Path) -> list[Snapshot]:
     snapshots = []
     for path in sorted((day_dir / "snapshots").glob("*.json")):
@@ -88,6 +84,72 @@ def load_day_snapshots(day_dir: Path) -> list[Snapshot]:
             print(f"  跳过无法读取的快照 {path}: {exc}")
     snapshots.sort(key=lambda snapshot: snapshot.fetched_at)
     return snapshots
+
+
+def load_previous_context(
+    data_dir: Path, platform: str, day: str
+) -> dict[str, Any] | None:
+    previous = (date.fromisoformat(day) - timedelta(days=1)).isoformat()
+    path = day_directory(data_dir, platform, previous) / "report.json"
+    try:
+        report = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(report, dict):
+        return None
+    themes = [
+        {
+            "topic": str(theme.get("topic") or ""),
+            "summary": str(theme.get("summary") or ""),
+        }
+        for theme in report.get("themes") or []
+        if isinstance(theme, dict)
+    ]
+    return {
+        "date": str(report.get("date") or previous),
+        "overview": str(report.get("overview") or ""),
+        "themes": themes,
+    }
+
+
+def load_previous_top_items(
+    data_dir: Path, platform: str, day: str
+) -> list[dict[str, Any]]:
+    previous = (date.fromisoformat(day) - timedelta(days=1)).isoformat()
+    path = day_directory(data_dir, platform, previous) / "top.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    items = payload.get("items") if isinstance(payload, dict) else None
+    if not isinstance(items, list):
+        return []
+    return [item for item in items if isinstance(item, dict)]
+
+
+def apply_previous_top(
+    top: list[dict[str, Any]], previous_items: list[dict[str, Any]]
+) -> None:
+    """Annotate Top100 entries against the previous day's Top100."""
+    if not previous_items:
+        return
+    previous_by_id = {str(item.get("id")): item for item in previous_items}
+    previous_rank = {
+        str(item.get("id")): rank
+        for rank, item in enumerate(previous_items, start=1)
+    }
+    for board_rank, entry in enumerate(top, start=1):
+        entry["board_rank"] = board_rank
+        previous = previous_by_id.get(str(entry["id"]))
+        if previous is None:
+            entry["status"] = "new"
+            continue
+        entry["status"] = "continuing"
+        entry["prev_score"] = previous.get("score")
+        previous_board_rank = previous_rank.get(str(entry["id"]))
+        if previous_board_rank is not None:
+            entry["prev_board_rank"] = previous_board_rank
+            entry["board_rank_delta"] = previous_board_rank - board_rank
 
 
 def load_boundary_snapshot(
@@ -163,137 +225,12 @@ def aggregate_snapshots(snapshots: list[Snapshot]) -> list[dict[str, Any]]:
     )
 
 
-def load_previous_items(data_dir: Path, platform: str, day: str) -> dict[str, dict]:
-    prev = previous_day(day)
-    prev_dir = day_directory(data_dir, platform, prev)
-    seen_path = prev_dir / "seen.json"
-    if seen_path.exists():
-        try:
-            payload = json.loads(seen_path.read_text(encoding="utf-8"))
-            items = payload.get("items") if isinstance(payload, dict) else None
-            if isinstance(items, list):
-                return {
-                    str(item["id"]): item
-                    for item in items
-                    if isinstance(item, dict) and item.get("id") is not None
-                }
-        except (OSError, ValueError):
-            pass
-
-    snapshots = load_day_snapshots(prev_dir)
-    if snapshots:
-        return {entry["id"]: entry for entry in aggregate_snapshots(snapshots)}
-    return {}
-
-
-def load_previous_summary(
-    data_dir: Path, platform: str, day: str
-) -> tuple[dict | None, dict | None]:
-    prev_dir = day_directory(data_dir, platform, previous_day(day))
-    report = None
-    top = None
-    report_path = prev_dir / "report.json"
-    if report_path.exists():
-        try:
-            loaded = json.loads(report_path.read_text(encoding="utf-8"))
-            if isinstance(loaded, dict) and loaded.get("schema_version") == 2:
-                report = loaded
-        except (OSError, ValueError):
-            pass
-    top_path = prev_dir / "top.json"
-    if top_path.exists():
-        try:
-            loaded = json.loads(top_path.read_text(encoding="utf-8"))
-            if isinstance(loaded, dict):
-                top = loaded
-        except (OSError, ValueError):
-            pass
-    return report, top
-
-
-def day_over_day_metrics(
-    continuing: list[dict[str, Any]],
-    previous_report: dict | None,
-    unique_today: int,
-) -> dict[str, Any]:
-    movers = []
-    for entry in continuing:
-        prev_score = entry.get("prev_score")
-        if prev_score is None:
-            continue
-        score_delta = float(entry["score"]) - float(prev_score)
-        best_rank = int(entry.get("best_rank") or 999)
-        prev_best = int(entry.get("prev_best_rank") or 999)
-        movers.append(
-            {
-                "id": entry["id"],
-                "title": entry["title"],
-                "url": entry.get("url") or "",
-                "score": round(float(entry["score"]), 3),
-                "prev_score": round(float(prev_score), 3),
-                "score_delta": round(score_delta, 3),
-                "best_rank": best_rank,
-                "prev_best_rank": prev_best,
-                "rank_delta": prev_best - best_rank,
-            }
-        )
-
-    risers = sorted(
-        (entry for entry in movers if entry["score_delta"] > 0),
-        key=lambda entry: entry["score_delta"],
-        reverse=True,
-    )[:5]
-    fallers = sorted(
-        (entry for entry in movers if entry["score_delta"] < 0),
-        key=lambda entry: entry["score_delta"],
-    )[:5]
-
-    unique_delta = None
-    if previous_report is not None:
-        previous_unique = (previous_report.get("coverage") or {}).get(
-            "unique_questions"
-        )
-        if previous_unique is not None:
-            unique_delta = unique_today - int(previous_unique)
-
-    return {
-        "previous_date": str(previous_report.get("date") or "") if previous_report else None,
-        "unique_delta": unique_delta,
-        "risers": risers,
-        "fallers": fallers,
-    }
-
-
 def build_top(
     items: list[dict[str, Any]],
-    previous: dict[str, dict],
     *,
     limit: int = TOP_LIMIT,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    current_ids = {entry["id"] for entry in items}
-
-    for entry in items:
-        prev = previous.get(entry["id"])
-        entry["status"] = "new" if prev is None else "continuing"
-        if prev is not None:
-            entry["prev_score"] = prev.get("score")
-            entry["prev_best_rank"] = prev.get("best_rank")
-            entry["prev_appearances"] = prev.get("appearances")
-
-    top = items[:limit]
-
-    retired = [
-        dict(entry, status="retired")
-        for entry in previous.values()
-        if entry.get("id") not in current_ids
-    ]
-    retired.sort(
-        key=lambda entry: (
-            -float(entry.get("score") or 0),
-            int(entry.get("best_rank") or 999),
-        )
-    )
-    return top, retired
+) -> list[dict[str, Any]]:
+    return items[:limit]
 
 
 def select_analyze_items(top: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -320,26 +257,10 @@ def _compact(entry: dict[str, Any]) -> dict[str, Any]:
         "last_seen",
         "status",
         "prev_score",
-        "prev_best_rank",
-        "prev_appearances",
         "board_rank",
         "prev_board_rank",
         "board_rank_delta",
         "analysis",
-    )
-    return {key: entry[key] for key in keys if key in entry}
-
-
-def _seen(entry: dict[str, Any]) -> dict[str, Any]:
-    keys = (
-        "id",
-        "title",
-        "url",
-        "appearances",
-        "score",
-        "best_rank",
-        "first_seen",
-        "last_seen",
     )
     return {key: entry[key] for key in keys if key in entry}
 
@@ -857,45 +778,15 @@ def aggregate_analysis(
     day_dir: Path,
     day: str,
     *,
-    counts: dict[str, int],
     top: list[dict[str, Any]],
-    retired_all: list[dict[str, Any]],
     analyze_items: list[dict[str, Any]],
-    previous_report: dict | None,
-    previous_top: dict | None,
-    day_over_day: dict[str, Any],
+    previous_context: dict[str, Any] | None,
 ) -> tuple[str, str, list[dict[str, Any]], dict[str, Any]]:
     known_ids = {item["id"] for item in top}
-    previous_context = None
-    if previous_report is not None:
-        previous_context = {
-            "date": previous_report.get("date"),
-            "overview": previous_report.get("overview") or "",
-            "themes": previous_report.get("themes") or [],
-            "top_items": [
-                {
-                    "id": item.get("id"),
-                    "title": item.get("title"),
-                    "score": item.get("score"),
-                    "best_rank": item.get("best_rank"),
-                }
-                for item in (previous_top or {}).get("items") or []
-                if isinstance(item, dict)
-            ][:20],
-        }
 
     payload = {
         "date": day,
-        "counts": counts,
-        "retired_previous_day": [
-            {
-                "id": item.get("id"),
-                "title": item.get("title"),
-                "score": round(float(item.get("score") or 0), 3),
-                "best_rank": item.get("best_rank"),
-            }
-            for item in retired_all
-        ],
+        "previous_day": previous_context,
         "analyses": [
             {"id": item["id"], "title": item["title"], "analysis": item.get("analysis")}
             for item in analyze_items
@@ -910,8 +801,6 @@ def aggregate_analysis(
             }
             for item in top
         ],
-        "previous_day": previous_context,
-        "day_over_day_metrics": day_over_day,
     }
     try:
         response = chat_json(AGG_SYSTEM, json.dumps(payload, ensure_ascii=False))
@@ -1005,38 +894,9 @@ def run_daily_summary(
             raise SystemExit(f"{day_dir} 没有快照，无法生成日报")
 
         items = aggregate_snapshots(snapshots)
-        previous = load_previous_items(data_dir, platform, day)
-        previous_report, previous_top = load_previous_summary(
-            data_dir, platform, day
-        )
-        top, retired_all = build_top(items, previous)
-        previous_board = {
-            str(item.get("id")): board_rank
-            for board_rank, item in enumerate(
-                (previous_top or {}).get("items") or [], start=1
-            )
-            if isinstance(item, dict)
-        }
-        for board_rank, entry in enumerate(top, start=1):
-            entry["board_rank"] = board_rank
-            prev_rank = previous_board.get(str(entry["id"]))
-            if prev_rank is not None:
-                entry["prev_board_rank"] = prev_rank
-                entry["board_rank_delta"] = prev_rank - board_rank
-
-        new_items = [entry for entry in top if entry["status"] == "new"]
-        continuing = [entry for entry in top if entry["status"] == "continuing"]
-        retired_sample = retired_all[:20]
-        counts = {
-            "snapshots": len(snapshots),
-            "unique_questions": len(items),
-            "new": len(new_items),
-            "continuing": len(continuing),
-            "retired": len(retired_all),
-        }
-        dod_metrics = day_over_day_metrics(
-            continuing, previous_report, len(items)
-        )
+        top = build_top(items)
+        apply_previous_top(top, load_previous_top_items(data_dir, platform, day))
+        previous_context = load_previous_context(data_dir, platform, day)
 
         step = "answers"
         analyze_items = _apply_quota(day_dir, select_analyze_items(top))
@@ -1053,21 +913,17 @@ def run_daily_summary(
             overview, dod_summary, themes, aggregate_usage = aggregate_analysis(
                 day_dir,
                 day,
-                counts=counts,
                 top=top,
-                retired_all=retired_all,
                 analyze_items=analyze_items,
-                previous_report=previous_report,
-                previous_top=previous_top,
-                day_over_day=dod_metrics,
+                previous_context=previous_context,
             )
             usages.append(aggregate_usage)
         else:
             overview = "回答摘要额度不足，本日仅保留榜单统计。"
             dod_summary = (
                 "回答额度不足，未生成模型对比分析。"
-                if previous_report is not None
-                else "无前一逻辑日数据，无法对比。"
+                if previous_context is not None
+                else "无前一逻辑日议题数据，无法对比。"
             )
             themes = []
 
@@ -1080,10 +936,6 @@ def run_daily_summary(
             "snapshots": len(snapshots),
             "unique_questions": len(items),
             "items": [_compact(entry) for entry in top],
-        }
-        seen_doc = {
-            "date": day,
-            "items": [_seen(entry) for entry in items],
         }
         report = {
             "schema_version": 2,
@@ -1098,17 +950,15 @@ def run_daily_summary(
                 "analyzed_questions": len(analyze_items),
                 "answers_analyzed": answers_count,
             },
-            "counts": counts,
             "overview": overview,
-            "day_over_day": {"summary": dod_summary, **dod_metrics},
-            "new_topics": [_compact(entry) for entry in new_items[:20]],
-            "continuing_topics": [_compact(entry) for entry in continuing[:20]],
-            "retired_topics": [_compact(entry) for entry in retired_sample],
+            "day_over_day": {
+                "summary": dod_summary,
+                "previous_date": (previous_context or {}).get("date"),
+            },
             "themes": themes,
             "usage": {"calls": usages, "totals": _usage_totals(usages)},
         }
         _write_json(day_dir / "top.json", top_doc)
-        _write_json(day_dir / "seen.json", seen_doc)
         _write_json(day_dir / "report.json", report)
 
         step = "build"
