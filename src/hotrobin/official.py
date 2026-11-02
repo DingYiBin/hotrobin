@@ -6,6 +6,7 @@ import http.client
 import json
 import os
 import re
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -20,6 +21,7 @@ BASE_URL = "https://developer.zhihu.com"
 QUESTION_RE = re.compile(r"/question/(\d+)")
 ARTICLE_RE = re.compile(r"/p/(\d+)")
 DEFAULT_ANSWER_LIMIT = 50
+_REQUEST_LOCK = threading.Lock()
 
 
 class ZhihuAPIError(RuntimeError):
@@ -53,8 +55,11 @@ def _api_get(
             },
         )
         try:
-            with urllib.request.urlopen(request, timeout=60) as response:
-                body = json.loads(response.read().decode("utf-8", "replace"))
+            # Hot-list snapshots and answer pages run in different threads;
+            # serialize requests so they never hit the API at the same time.
+            with _REQUEST_LOCK:
+                with urllib.request.urlopen(request, timeout=60) as response:
+                    body = json.loads(response.read().decode("utf-8", "replace"))
         except urllib.error.HTTPError as exc:
             raw = exc.read()[:300].decode("utf-8", "replace")
             if exc.code in (429, 500, 502, 503, 504) and attempt < attempts - 1:
