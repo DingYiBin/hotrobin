@@ -86,7 +86,7 @@ def chat_json(system: str, user: str) -> ChatResult:
             {"role": "user", "content": user},
         ],
         "max_tokens": _max_tokens(),
-        "temperature": 0.2,
+        "temperature": 0.6,
         "response_format": {"type": "json_object"},
     }
     body = json.dumps(payload).encode("utf-8")
